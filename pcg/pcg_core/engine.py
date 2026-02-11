@@ -53,6 +53,11 @@ class BuildingConfig(PCGConfig):
     building_width: float = 30.0     # 建筑宽度(米) - X方向
     building_depth: float = 20.0     # 建筑进深(米) - Z方向
 
+    # 底面轮廓类型
+    footprint_type: str = "rectangle"  # "rectangle", "l_shape", "t_shape", "hexagon", "custom"
+    footprint_params: dict = None      # 底面轮廓参数（根据类型不同）
+    custom_vertices: list = None       # 自定义多边形顶点 [(x,z), ...]
+
     # 外墙参数
     wall_thickness: float = 0.3      # 外墙厚度(米)
     wall_color: tuple = (0.85, 0.82, 0.78)  # 外墙颜色

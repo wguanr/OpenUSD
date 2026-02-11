@@ -231,6 +231,67 @@ class CornerJoiner90(IJoiner):
         )
 
 
+class CornerJoinerGeneric(IJoiner):
+    """
+    通用角度转角连接件。
+
+    支持任意角度的转角柱，通过四边形截面棱柱体实现。
+    截面由 BuildingFootprint.corner_quad() 提供。
+    """
+
+    def generate_usd(self, bridge, path: str,
+                     position: Tuple[float, float, float],
+                     height: float, thickness: float,
+                     angle: float = 90.0,
+                     display_color: Tuple[float, float, float] = (0.8, 0.77, 0.73)
+                     ) -> None:
+        # 对于90度角，退化为简单box
+        if abs(angle - 90.0) < 1.0:
+            bridge.create_box_mesh(
+                path,
+                width=thickness,
+                height=height,
+                depth=thickness,
+                translate=position,
+                display_color=display_color
+            )
+        else:
+            # 非90度角时，使用外部提供的quad截面
+            # 这个方法会被 generate_usd_with_quad 覆盖
+            bridge.create_box_mesh(
+                path,
+                width=thickness,
+                height=height,
+                depth=thickness,
+                translate=position,
+                display_color=display_color
+            )
+
+    def generate_usd_with_quad(self, bridge, path: str,
+                                quad_xz: list,
+                                y_bottom: float, y_top: float,
+                                display_color: Tuple[float, float, float] = (0.8, 0.77, 0.73)
+                                ) -> None:
+        """
+        使用精确的四边形截面生成转角柱。
+
+        Args:
+            bridge: USD操作桥接层
+            path: USD Prim路径
+            quad_xz: 四边形截面顶点 [(x,z), ...]
+            y_bottom: 底部Y坐标
+            y_top: 顶部Y坐标
+            display_color: 显示颜色
+        """
+        bridge.create_prism_mesh(
+            path,
+            quad_xz=quad_xz,
+            y_bottom=y_bottom,
+            y_top=y_top,
+            display_color=display_color
+        )
+
+
 class TJoiner(IJoiner):
     """
     T形连接件。
@@ -402,3 +463,67 @@ class WallLayout:
             ))
 
         return cls(edges=edges)
+
+    @classmethod
+    def create_from_footprint(cls, footprint,
+                              wall_thickness: float, wall_height: float,
+                              edge_configs: Optional[Dict[int, List[Dict]]] = None,
+                              default_segment_type: str = "WindowWall",
+                              **default_segment_kwargs) -> WallLayout:
+        """
+        工厂方法：从 BuildingFootprint 创建墙体布局。
+
+        支持任意多边形底面，自动为每条边创建墙段。
+
+        Args:
+            footprint: BuildingFootprint 实例
+            wall_thickness: 墙体厚度
+            wall_height: 墙体高度（单层净高）
+            edge_configs: 每条边的墙段配置，键为边索引 {0: [...], 1: [...]}
+            default_segment_type: 默认墙段类型
+            **default_segment_kwargs: 默认墙段的额外参数
+        """
+        wt = wall_thickness
+        edges = []
+
+        for i in range(footprint.num_edges):
+            # 计算这条边的净墙段长度（扣除两端转角柱）
+            net_length = footprint.wall_edge_net_length(i, wt)
+
+            # 计算墙段起点（扣除起始转角柱后的外轮廓点）
+            start_pt = footprint.wall_edge_start_point(i, wt)
+
+            # 计算墙段终点
+            d = footprint.edge_direction(i)
+            end_pt = (start_pt[0] + d[0] * net_length,
+                      start_pt[1] + d[1] * net_length)
+
+            edge_name = f"edge_{i}"
+            segments = []
+
+            if edge_configs and i in edge_configs:
+                for seg_cfg in edge_configs[i]:
+                    seg_cfg = dict(seg_cfg)  # 复制以避免修改原始数据
+                    seg_type = seg_cfg.pop("type", default_segment_type)
+                    seg_cfg.setdefault("height", wall_height)
+                    seg_cfg.setdefault("thickness", wall_thickness)
+                    segments.append(IWallSegment.create(seg_type, **seg_cfg))
+            else:
+                if net_length > 0.1:  # 边太短则跳过
+                    kwargs = {
+                        "length": net_length,
+                        "height": wall_height,
+                        "thickness": wall_thickness,
+                        "name": f"{edge_name}_default",
+                    }
+                    kwargs.update(default_segment_kwargs)
+                    segments.append(IWallSegment.create(default_segment_type, **kwargs))
+
+            edges.append(WallEdge(
+                name=edge_name,
+                start_point=start_pt,
+                end_point=end_pt,
+                segments=segments,
+            ))
+
+        return cls(edges=edges, joiner=CornerJoinerGeneric())

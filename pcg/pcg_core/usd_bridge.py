@@ -502,6 +502,143 @@ class UsdBridge:
         return "token"
 
     # =========================================================================
+    # 多边形几何体
+    # =========================================================================
+
+    def create_polygon_slab(self, path: str,
+                            vertices_xz: list,
+                            triangles: list,
+                            thickness: float,
+                            y_center: float = 0.0,
+                            display_color=None) -> UsdGeom.Mesh:
+        """
+        创建多边形楼板/屋顶Mesh。
+
+        通过拉伸多边形生成带厚度的楼板，包含上下表面和侧面。
+
+        Args:
+            path: Prim路径
+            vertices_xz: XZ平面上的顶点列表 [(x,z), ...]
+            triangles: 三角化索引 [(i0,i1,i2), ...]
+            thickness: 楼板厚度
+            y_center: 楼板Y方向中心
+            display_color: 显示颜色
+        """
+        mesh = UsdGeom.Mesh.Define(self.stage, path)
+        n = len(vertices_xz)
+        ht = thickness / 2
+        y_top = y_center + ht
+        y_bot = y_center - ht
+
+        # 顶点: 上表面n个 + 下表面n个
+        points = []
+        for x, z in vertices_xz:
+            points.append(Gf.Vec3f(x, y_top, z))  # 上表面 [0..n-1]
+        for x, z in vertices_xz:
+            points.append(Gf.Vec3f(x, y_bot, z))   # 下表面 [n..2n-1]
+
+        face_counts = []
+        face_indices = []
+
+        # 上表面（法线朝上）
+        for i0, i1, i2 in triangles:
+            face_counts.append(3)
+            face_indices.extend([i0, i2, i1])  # 逆时针 → 法线朝上
+
+        # 下表面（法线朝下）
+        for i0, i1, i2 in triangles:
+            face_counts.append(3)
+            face_indices.extend([i0 + n, i1 + n, i2 + n])  # 顺时针 → 法线朝下
+
+        # 侧面（每条边一个矩形）
+        for i in range(n):
+            j = (i + 1) % n
+            # 上表面的边: i_top, j_top
+            # 下表面的边: i_bot, j_bot
+            face_counts.append(4)
+            face_indices.extend([i, j, j + n, i + n])  # 法线朝外
+
+        mesh.GetPointsAttr().Set(Vt.Vec3fArray(points))
+        mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray(face_counts))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(face_indices))
+        mesh.GetSubdivisionSchemeAttr().Set("none")
+
+        # Extent
+        xs = [v[0] for v in vertices_xz]
+        zs = [v[1] for v in vertices_xz]
+        mesh.GetExtentAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(min(xs), y_bot, min(zs)),
+            Gf.Vec3f(max(xs), y_top, max(zs)),
+        ]))
+
+        if display_color:
+            mesh.GetDisplayColorAttr().Set(
+                Vt.Vec3fArray([Gf.Vec3f(*display_color)])
+            )
+
+        return mesh
+
+    def create_prism_mesh(self, path: str,
+                          quad_xz: list,
+                          y_bottom: float, y_top: float,
+                          display_color=None) -> UsdGeom.Mesh:
+        """
+        创建四边形截面的棱柱体Mesh（用于转角柱）。
+
+        Args:
+            path: Prim路径
+            quad_xz: XZ平面上的四边形顶点 [(x,z), ...]（顺时针）
+            y_bottom: 底部Y坐标
+            y_top: 顶部Y坐标
+            display_color: 显示颜色
+        """
+        mesh = UsdGeom.Mesh.Define(self.stage, path)
+        n = len(quad_xz)
+
+        # 顶点: 上表面n个 + 下表面n个
+        points = []
+        for x, z in quad_xz:
+            points.append(Gf.Vec3f(x, y_top, z))   # 上 [0..n-1]
+        for x, z in quad_xz:
+            points.append(Gf.Vec3f(x, y_bottom, z)) # 下 [n..2n-1]
+
+        face_counts = []
+        face_indices = []
+
+        # 上表面（法线朝上）- 顺时针多边形需要翻转为逆时针
+        face_counts.append(n)
+        face_indices.extend(list(range(n - 1, -1, -1)))
+
+        # 下表面（法线朝下）
+        face_counts.append(n)
+        face_indices.extend(list(range(n, 2 * n)))
+
+        # 侧面
+        for i in range(n):
+            j = (i + 1) % n
+            face_counts.append(4)
+            face_indices.extend([i, j, j + n, i + n])
+
+        mesh.GetPointsAttr().Set(Vt.Vec3fArray(points))
+        mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray(face_counts))
+        mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(face_indices))
+        mesh.GetSubdivisionSchemeAttr().Set("none")
+
+        xs = [v[0] for v in quad_xz]
+        zs = [v[1] for v in quad_xz]
+        mesh.GetExtentAttr().Set(Vt.Vec3fArray([
+            Gf.Vec3f(min(xs), y_bottom, min(zs)),
+            Gf.Vec3f(max(xs), y_top, max(zs)),
+        ]))
+
+        if display_color:
+            mesh.GetDisplayColorAttr().Set(
+                Vt.Vec3fArray([Gf.Vec3f(*display_color)])
+            )
+
+        return mesh
+
+    # =========================================================================
     # 材质系统
     # =========================================================================
 

@@ -1,27 +1,26 @@
 """
-Building Generator v3: 模块化墙体拼接版。
+Building Generator v4: 多边形底面版。
 
 核心架构变更：
-  v2: 硬编码四面墙 → 每面墙是一整块Mesh
-  v3: 模块化拼接   → 每面墙由多个可替换的WallSegment组成
+  v3: 矩形底面 → 硬编码四条边
+  v4: 任意多边形底面 → BuildingFootprint 驱动所有几何体
 
 建筑外壳生成流程：
-  1. 创建 WallLayout（定义四条边和每条边上的墙段序列）
-  2. 沿每条边遍历墙段，通过 Xform 变换将局部坐标映射到世界坐标
-  3. 在每条边的两端放置 CornerJoiner（转角柱）
-  4. 收集所有墙段返回的窗户位置，用全局 PointInstancer 生成窗户
+  1. 从配置创建 BuildingFootprint（矩形/L形/T形/六边形/自定义）
+  2. 用 Footprint 生成多边形楼板（create_polygon_slab）
+  3. 用 Footprint.corner_quad() 生成精确截面的转角柱（create_prism_mesh）
+  4. 用 WallLayout.create_from_footprint() 创建墙体布局
+  5. 沿每条边遍历墙段，通过 Xform 变换放置到世界坐标
+  6. 收集窗户位置，用全局 PointInstancer 生成窗户
 
-坐标约定（与v2一致）：
-  - 建筑中心在原点
+坐标约定：
+  - 建筑质心在原点（XZ平面）
   - X轴: 建筑宽度方向
   - Y轴: 高度方向（向上）
   - Z轴: 建筑深度方向
+  - 顶点按顺时针排列（从+Y俯视）
   - 外墙外表面对齐建筑外轮廓
-
-墙段局部坐标系：
-  - X: [0, length]  沿墙段长度
-  - Y: [0, height]  沿墙段高度
-  - Z: [0, -thickness]  厚度向内
+  - 墙体厚度统一向内
 """
 
 import math
@@ -31,16 +30,17 @@ from pxr import Gf, Vt, Sdf, UsdGeom
 
 from pcg_core.engine import GeneratorBase, BuildingConfig
 from pcg_core.usd_bridge import UsdBridge
+from pcg_core.footprint import BuildingFootprint
 from pcg_core.wall_module import (
     IWallSegment, WallSegmentResult, WallLayout, WallEdge,
-    CornerJoiner90, IJoiner
+    CornerJoiner90, CornerJoinerGeneric, IJoiner
 )
 # 导入所有墙段类型以触发注册
 import pcg_core.wall_segments  # noqa: F401
 
 
 class BuildingGenerator(GeneratorBase):
-    """办公楼程序化生成器（v3 - 模块化墙体拼接版）。"""
+    """办公楼程序化生成器（v4 - 多边形底面版）。"""
 
     def __init__(self, bridge: UsdBridge, config: BuildingConfig):
         super().__init__(bridge, config)
@@ -55,11 +55,18 @@ class BuildingGenerator(GeneratorBase):
         stats = {
             "building_name": self.cfg.building_name,
             "num_floors": self.cfg.num_floors,
-            "dimensions": f"{self.cfg.building_width}x{self.cfg.building_depth}x"
-                          f"{self.cfg.num_floors * self.cfg.floor_height}m",
+            "footprint_type": self.cfg.footprint_type,
         }
 
-        # 预计算关键尺寸
+        # 第一步：创建建筑底面轮廓
+        with self._time_it("footprint"):
+            self._footprint = self._create_footprint()
+            stats["footprint_vertices"] = self._footprint.num_vertices
+            stats["footprint_area_m2"] = round(self._footprint.area(), 1)
+            bbox = self._footprint.bounding_box_size()
+            stats["bounding_box"] = f"{bbox[0]:.1f}x{bbox[1]:.1f}m"
+
+        # 预计算
         self._precompute_dimensions()
 
         with self._time_it("materials"):
@@ -78,7 +85,8 @@ class BuildingGenerator(GeneratorBase):
         with self._time_it("windows"):
             stats["num_windows"] = self._generate_windows_from_layout(root)
 
-        if self.cfg.enable_interior:
+        if self.cfg.enable_interior and self.cfg.footprint_type == "rectangle":
+            # 内部布局目前仅支持矩形（后续可扩展）
             with self._time_it("interior"):
                 stats.update(self._generate_interior(root))
 
@@ -91,30 +99,70 @@ class BuildingGenerator(GeneratorBase):
         return stats
 
     # =========================================================================
+    # 底面轮廓创建
+    # =========================================================================
+
+    def _create_footprint(self) -> BuildingFootprint:
+        """根据配置创建建筑底面轮廓。"""
+        ft = self.cfg.footprint_type
+        params = self.cfg.footprint_params or {}
+
+        if ft == "rectangle":
+            return BuildingFootprint.rectangle(
+                self.cfg.building_width,
+                self.cfg.building_depth
+            )
+        elif ft == "l_shape":
+            return BuildingFootprint.l_shape(
+                w1=params.get("w1", self.cfg.building_width * 0.6),
+                d1=params.get("d1", self.cfg.building_depth),
+                w2=params.get("w2", self.cfg.building_width * 0.4),
+                d2=params.get("d2", self.cfg.building_depth * 0.5),
+                center=True,
+            )
+        elif ft == "t_shape":
+            return BuildingFootprint.t_shape(
+                w_main=params.get("w_main", self.cfg.building_width),
+                d_main=params.get("d_main", self.cfg.building_depth * 0.4),
+                w_stem=params.get("w_stem", self.cfg.building_width * 0.4),
+                d_stem=params.get("d_stem", self.cfg.building_depth * 0.6),
+                center=True,
+            )
+        elif ft == "hexagon":
+            return BuildingFootprint.regular_polygon(
+                n_sides=params.get("n_sides", 6),
+                radius=params.get("radius", min(self.cfg.building_width, self.cfg.building_depth) / 2),
+            )
+        elif ft == "pentagon":
+            return BuildingFootprint.regular_polygon(
+                n_sides=5,
+                radius=params.get("radius", min(self.cfg.building_width, self.cfg.building_depth) / 2),
+            )
+        elif ft == "octagon":
+            return BuildingFootprint.regular_polygon(
+                n_sides=8,
+                radius=params.get("radius", min(self.cfg.building_width, self.cfg.building_depth) / 2),
+            )
+        elif ft == "custom":
+            verts = self.cfg.custom_vertices
+            if not verts:
+                raise ValueError("custom footprint requires 'custom_vertices' in config")
+            return BuildingFootprint.from_vertices(verts)
+        else:
+            raise ValueError(f"Unknown footprint_type: '{ft}'. "
+                             f"Available: rectangle, l_shape, t_shape, hexagon, pentagon, octagon, custom")
+
+    # =========================================================================
     # 预计算
     # =========================================================================
 
     def _precompute_dimensions(self):
         """预计算所有关键尺寸。"""
-        W = self.cfg.building_width
-        D = self.cfg.building_depth
         wt = self.cfg.wall_thickness
         ft = self.cfg.floor_thickness
         H = self.cfg.floor_height
 
-        self._front_back_wall_length = W - 2 * wt
-        self._left_right_wall_length = D - 2 * wt
         self._wall_net_height = H - ft
-        self._interior_width = W - 2 * wt
-        self._interior_depth = D - 2 * wt
-
-        # 转角柱中心位置
-        self._corners = [
-            ("NE", (W/2 - wt/2,  D/2 - wt/2)),
-            ("NW", (-(W/2 - wt/2), D/2 - wt/2)),
-            ("SE", (W/2 - wt/2, -(D/2 - wt/2))),
-            ("SW", (-(W/2 - wt/2), -(D/2 - wt/2))),
-        ]
 
         # 全局窗户位置收集器（世界坐标）
         self._all_window_positions: List[Tuple[float, float, float]] = []
@@ -126,15 +174,12 @@ class BuildingGenerator(GeneratorBase):
 
     def _create_wall_layout(self, wall_height: float) -> WallLayout:
         """
-        根据配置创建墙体布局。
+        根据配置和底面轮廓创建墙体布局。
 
-        如果配置中有 wall_layout 字段，使用用户自定义布局；
-        否则使用默认布局（所有边都是 WindowWall）。
+        对于矩形底面，使用传统的 create_rectangular 方法（保持向后兼容）。
+        对于多边形底面，使用新的 create_from_footprint 方法。
         """
         wt = self.cfg.wall_thickness
-
-        # 检查是否有用户自定义的墙体布局
-        edge_configs = getattr(self.cfg, 'wall_layout', None)
 
         # 默认的窗户参数
         default_kwargs = {
@@ -145,20 +190,48 @@ class BuildingGenerator(GeneratorBase):
             "color": self.cfg.wall_color,
         }
 
-        layout = WallLayout.create_rectangular(
-            width=self.cfg.building_width,
-            depth=self.cfg.building_depth,
-            wall_thickness=wt,
-            wall_height=wall_height,
-            edge_configs=edge_configs,
-            default_segment_type="WindowWall",
-            **default_kwargs,
-        )
+        # 检查是否有用户自定义的墙体布局
+        edge_configs = getattr(self.cfg, 'wall_layout', None)
+
+        if self.cfg.footprint_type == "rectangle" and edge_configs:
+            # 矩形 + 自定义边配置 → 使用传统方法
+            layout = WallLayout.create_rectangular(
+                width=self.cfg.building_width,
+                depth=self.cfg.building_depth,
+                wall_thickness=wt,
+                wall_height=wall_height,
+                edge_configs=edge_configs,
+                default_segment_type="WindowWall",
+                **default_kwargs,
+            )
+        else:
+            # 通用多边形路径
+            # 将 edge_configs 从 name-based 转换为 index-based（如果有的话）
+            idx_configs = None
+            if edge_configs and isinstance(edge_configs, dict):
+                # 尝试将 "edge_0", "edge_1" 等转换为整数键
+                idx_configs = {}
+                for k, v in edge_configs.items():
+                    if k.startswith("edge_"):
+                        try:
+                            idx = int(k.split("_")[1])
+                            idx_configs[idx] = v
+                        except (ValueError, IndexError):
+                            pass
+
+            layout = WallLayout.create_from_footprint(
+                footprint=self._footprint,
+                wall_thickness=wt,
+                wall_height=wall_height,
+                edge_configs=idx_configs,
+                default_segment_type="WindowWall",
+                **default_kwargs,
+            )
 
         return layout
 
     # =========================================================================
-    # 模块化外墙生成（核心重构）
+    # 模块化外墙生成
     # =========================================================================
 
     def _generate_modular_walls(self, root: str) -> Dict[str, Any]:
@@ -166,8 +239,8 @@ class BuildingGenerator(GeneratorBase):
         使用模块化拼接系统生成所有外墙。
 
         对每一层楼：
-          1. 创建该层的 WallLayout
-          2. 遍历四条边，沿每条边依次放置墙段模块
+          1. 创建该层的 WallLayout（基于 Footprint）
+          2. 遍历每条边，沿边依次放置墙段模块
           3. 通过 Xform 变换将墙段从局部坐标映射到世界坐标
           4. 收集窗户位置用于后续 PointInstancer 生成
         """
@@ -177,8 +250,6 @@ class BuildingGenerator(GeneratorBase):
         wt = self.cfg.wall_thickness
         H = self.cfg.floor_height
         ft = self.cfg.floor_thickness
-        W = self.cfg.building_width
-        D = self.cfg.building_depth
 
         total_segments = 0
         total_windows_in_walls = 0
@@ -193,7 +264,7 @@ class BuildingGenerator(GeneratorBase):
             # 为这一层创建墙体布局
             layout = self._create_wall_layout(wall_h)
 
-            # 遍历四条边
+            # 遍历每条边
             for edge in layout.edges:
                 edge_path = f"{floor_path}/Edge_{edge.name}"
                 self.bridge.define_xform(edge_path)
@@ -214,8 +285,6 @@ class BuildingGenerator(GeneratorBase):
                     world_z = sz + dz * cursor
 
                     # 创建 Xform 节点，将墙段从局部坐标映射到世界坐标
-                    # 墙段局部坐标: X沿长度, Y沿高度, Z沿厚度(向内)
-                    # 世界坐标: 需要旋转使X对齐edge方向, Z对齐外法线反方向(向内)
                     heading = edge.heading_angle_deg()
 
                     xform = self.bridge.define_xform(
@@ -229,7 +298,6 @@ class BuildingGenerator(GeneratorBase):
 
                     # 将局部窗户位置转换为世界坐标
                     for lx, ly, lz in result.window_positions:
-                        # 局部→世界变换：先旋转再平移
                         rad = math.radians(heading)
                         cos_a = math.cos(rad)
                         sin_a = math.sin(rad)
@@ -241,14 +309,12 @@ class BuildingGenerator(GeneratorBase):
                         self._all_window_positions.append((wx, wy, wz))
 
                         # 计算窗户朝向（四元数）
-                        # 窗户法线应该朝向外法线方向
                         quat = self._heading_to_quaternion(heading)
                         self._all_window_orientations.append(quat)
 
                     total_segments += 1
                     total_windows_in_walls += len(result.window_positions)
 
-                    # 移动游标到下一个墙段的起点
                     cursor += segment.length
 
         return {
@@ -305,7 +371,7 @@ class BuildingGenerator(GeneratorBase):
     # =========================================================================
 
     def _create_materials(self, root: str) -> None:
-        """创建建筑所需的所有材质。"""
+        """创建所有材质。"""
         mat_root = f"{root}/Materials"
         self.bridge.define_scope(mat_root)
 
@@ -327,18 +393,20 @@ class BuildingGenerator(GeneratorBase):
             diffuse_color=(0.80, 0.77, 0.73), roughness=0.8, metallic=0.0)
 
     # =========================================================================
-    # 楼板生成
+    # 楼板生成（多边形版）
     # =========================================================================
 
     def _generate_floor_slabs(self, root: str) -> int:
-        """生成所有楼层的楼板。"""
+        """生成所有楼层的楼板（支持多边形底面）。"""
         floors_root = f"{root}/FloorSlabs"
         self.bridge.define_scope(floors_root)
 
-        W = self.cfg.building_width
-        D = self.cfg.building_depth
         ft = self.cfg.floor_thickness
         H = self.cfg.floor_height
+
+        # 获取多边形顶点和三角化
+        verts = self._footprint.vertices
+        triangles = self._footprint.triangulate()
 
         num_slabs = 0
         for floor_idx in range(self.cfg.num_floors + 1):
@@ -346,11 +414,13 @@ class BuildingGenerator(GeneratorBase):
             slab_center_y = slab_top_y - ft / 2
 
             slab_path = f"{floors_root}/Slab_F{floor_idx}"
-            self.bridge.create_box_mesh(
+            self.bridge.create_polygon_slab(
                 slab_path,
-                width=W, height=ft, depth=D,
-                translate=(0, slab_center_y, 0),
-                display_color=self.cfg.floor_color
+                vertices_xz=verts,
+                triangles=triangles,
+                thickness=ft,
+                y_center=slab_center_y,
+                display_color=self.cfg.floor_color,
             )
             self.bridge.bind_material(slab_path, f"{root}/Materials/FloorMaterial")
             num_slabs += 1
@@ -358,11 +428,11 @@ class BuildingGenerator(GeneratorBase):
         return num_slabs
 
     # =========================================================================
-    # 转角柱生成
+    # 转角柱生成（多边形版）
     # =========================================================================
 
     def _generate_corner_columns(self, root: str) -> int:
-        """生成四个转角柱。"""
+        """生成所有转角柱（支持任意角度）。"""
         corners_root = f"{root}/CornerColumns"
         self.bridge.define_scope(corners_root)
 
@@ -374,18 +444,24 @@ class BuildingGenerator(GeneratorBase):
         column_bottom_y = 0.0
         column_top_y = num_floors * H - ft
         column_height = column_top_y - column_bottom_y
-        column_center_y = (column_bottom_y + column_top_y) / 2
 
-        joiner = CornerJoiner90()
+        joiner = CornerJoinerGeneric()
         count = 0
-        for name, (cx, cz) in self._corners:
-            col_path = f"{corners_root}/Corner_{name}"
-            joiner.generate_usd(
+
+        for i in range(self._footprint.num_vertices):
+            # 获取该顶点处的转角柱截面
+            quad = self._footprint.corner_quad(i, wt)
+            angle = self._footprint.interior_angle_deg(i)
+
+            col_path = f"{corners_root}/Corner_{i}"
+
+            # 使用精确的四边形截面生成转角柱
+            joiner.generate_usd_with_quad(
                 self.bridge, col_path,
-                position=(cx, column_center_y, cz),
-                height=column_height,
-                thickness=wt,
-                display_color=(0.80, 0.77, 0.73)
+                quad_xz=quad,
+                y_bottom=column_bottom_y,
+                y_top=column_top_y,
+                display_color=(0.80, 0.77, 0.73),
             )
             self.bridge.bind_material(col_path, f"{root}/Materials/CornerMaterial")
             count += 1
@@ -393,11 +469,11 @@ class BuildingGenerator(GeneratorBase):
         return count
 
     # =========================================================================
-    # 内部结构
+    # 内部结构（矩形专用，后续可扩展）
     # =========================================================================
 
     def _generate_interior(self, root: str) -> Dict[str, Any]:
-        """生成内部走廊和房间分隔。"""
+        """生成内部走廊和房间分隔（目前仅支持矩形底面）。"""
         interior_root = f"{root}/Interior"
         self.bridge.define_scope(interior_root)
 
@@ -409,8 +485,10 @@ class BuildingGenerator(GeneratorBase):
         H = self.cfg.floor_height
         ft = self.cfg.floor_thickness
 
-        inner_w = self._interior_width
-        inner_d = self._interior_depth
+        W = self.cfg.building_width
+        D = self.cfg.building_depth
+        inner_w = W - 2 * wt
+        inner_d = D - 2 * wt
 
         for floor_idx in range(self.cfg.num_floors):
             floor_base_y = floor_idx * H
@@ -467,60 +545,83 @@ class BuildingGenerator(GeneratorBase):
         return stats
 
     # =========================================================================
-    # 屋顶
+    # 屋顶（多边形版）
     # =========================================================================
 
     def _generate_roof(self, root: str) -> None:
-        """生成屋顶。"""
+        """生成屋顶（支持多边形底面）。"""
         roof_root = f"{root}/Roof"
         self.bridge.define_scope(roof_root)
 
-        W = self.cfg.building_width
-        D = self.cfg.building_depth
         wt = self.cfg.wall_thickness
         H = self.cfg.floor_height
         num_floors = self.cfg.num_floors
-
         roof_slab_top = num_floors * H
 
         if self.cfg.roof_style == "parapet":
             ph = self.cfg.parapet_height
-            parapet_cy = roof_slab_top + ph / 2
+            parapet_bottom = roof_slab_top
+            parapet_top = roof_slab_top + ph
 
-            fb_len = self._front_back_wall_length
-            lr_len = self._left_right_wall_length
-            fz = D/2 - wt/2
-            bz = -(D/2 - wt/2)
-            lx = -(W/2 - wt/2)
-            rx = W/2 - wt/2
+            # 为每条边生成女儿墙段
+            for i in range(self._footprint.num_edges):
+                net_len = self._footprint.wall_edge_net_length(i, wt)
+                if net_len < 0.1:
+                    continue
 
-            self.bridge.create_box_mesh(f"{roof_root}/Parapet_Front",
-                width=fb_len, height=ph, depth=wt,
-                translate=(0, parapet_cy, fz), display_color=self.cfg.roof_color)
-            self.bridge.create_box_mesh(f"{roof_root}/Parapet_Back",
-                width=fb_len, height=ph, depth=wt,
-                translate=(0, parapet_cy, bz), display_color=self.cfg.roof_color)
-            self.bridge.create_box_mesh(f"{roof_root}/Parapet_Left",
-                width=wt, height=ph, depth=lr_len,
-                translate=(lx, parapet_cy, 0), display_color=self.cfg.roof_color)
-            self.bridge.create_box_mesh(f"{roof_root}/Parapet_Right",
-                width=wt, height=ph, depth=lr_len,
-                translate=(rx, parapet_cy, 0), display_color=self.cfg.roof_color)
+                start_pt = self._footprint.wall_edge_start_point(i, wt)
+                d = self._footprint.edge_direction(i)
+                n = self._footprint.edge_outward_normal(i)
 
-            for name, (cx, cz) in self._corners:
+                # 女儿墙中心位置
+                mid_x = start_pt[0] + d[0] * net_len / 2
+                mid_z = start_pt[1] + d[1] * net_len / 2
+                parapet_cy = (parapet_bottom + parapet_top) / 2
+
+                # 计算heading角度
+                heading = self._footprint.edge_heading_deg(i)
+
+                parapet_path = f"{roof_root}/Parapet_Edge_{i}"
+                xform = self.bridge.define_xform(
+                    parapet_path,
+                    translate=(mid_x, parapet_cy, mid_z),
+                    rotate=(0, heading, 0),
+                )
+                # 在局部坐标系中创建墙段（X沿长度，Z沿厚度）
                 self.bridge.create_box_mesh(
-                    f"{roof_root}/ParapetCorner_{name}",
-                    width=wt, height=ph, depth=wt,
-                    translate=(cx, parapet_cy, cz),
-                    display_color=self.cfg.roof_color
+                    f"{parapet_path}/Geo",
+                    width=net_len, height=ph, depth=wt,
+                    translate=(net_len / 2, 0, -wt / 2),  # 局部偏移使外表面对齐
+                    display_color=self.cfg.roof_color,
                 )
 
+            # 女儿墙转角柱
+            for i in range(self._footprint.num_vertices):
+                quad = self._footprint.corner_quad(i, wt)
+                col_path = f"{roof_root}/ParapetCorner_{i}"
+                joiner = CornerJoinerGeneric()
+                joiner.generate_usd_with_quad(
+                    self.bridge, col_path,
+                    quad_xz=quad,
+                    y_bottom=parapet_bottom,
+                    y_top=parapet_top,
+                    display_color=self.cfg.roof_color,
+                )
+
+        # 屋顶板（带出挑）
         overhang = 0.25
-        self.bridge.create_box_mesh(
+        # 创建外扩的屋顶多边形
+        roof_footprint = self._footprint.inset_polygon(-overhang)
+        roof_verts = roof_footprint.vertices
+        roof_tris = roof_footprint.triangulate()
+
+        self.bridge.create_polygon_slab(
             f"{roof_root}/RoofSlab",
-            width=W + overhang * 2, height=0.15, depth=D + overhang * 2,
-            translate=(0, roof_slab_top + 0.075, 0),
-            display_color=self.cfg.roof_color
+            vertices_xz=roof_verts,
+            triangles=roof_tris,
+            thickness=0.15,
+            y_center=roof_slab_top + 0.075,
+            display_color=self.cfg.roof_color,
         )
         self.bridge.bind_material(f"{roof_root}/RoofSlab", f"{root}/Materials/RoofMaterial")
 
@@ -535,10 +636,14 @@ class BuildingGenerator(GeneratorBase):
         self.bridge.create_dome_light(f"{lights_root}/DomeLight", intensity=0.5)
 
         total_h = self.cfg.num_floors * self.cfg.floor_height
+        bbox = self._footprint.bounding_box_size()
+        max_dim = max(bbox[0], bbox[1])
+
         self.bridge.create_rect_light(
             f"{lights_root}/SunLight",
-            width=self.cfg.building_width * 2,
-            height=self.cfg.building_depth * 2,
+            width=max_dim * 2,
+            height=max_dim * 2,
             intensity=1000.0,
-            translate=(self.cfg.building_width, total_h * 1.5, self.cfg.building_depth)
+            translate=(max_dim, total_h * 1.5, max_dim)
         )
+
