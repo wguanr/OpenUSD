@@ -1,0 +1,5 @@
+output/benchmarks/
+output/*.usda
+output/*.usdc
+__pycache__/
+*.pyc
