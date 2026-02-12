@@ -202,69 +202,135 @@ class BuildingFootprint:
 
     def corner_quad(self, i: int, wall_thickness: float
                     ) -> List[Tuple[float, float]]:
+        """向后兼容别名。"""
+        return self.corner_polygon(i, wall_thickness)
+
+    def corner_polygon(self, i: int, wall_thickness: float
+                       ) -> List[Tuple[float, float]]:
         """
-        计算顶点i处转角柱的四边形截面（XZ平面）。
+        计算顶点i处转角柱的精确截面多边形（XZ平面）。
 
-        转角柱截面由4个点定义：
-          1. 外轮廓顶点
-          2. 前一条边内缩后在该顶点处的端点
-          3. 内缩多边形的顶点
-          4. 后一条边内缩后在该顶点处的端点
+        转角柱必须精确填充外轮廓顶点到两侧墙段端点之间的区域，
+        确保与相邻墙段无缝隙无重叠。
 
-        实际上简化为：外顶点 + 两个相邻边的内偏移端点 + 内缩顶点。
+        截面由以下关键点构成（去重后可能是4~6个点）：
+          - outer: 外轮廓顶点
+          - prev_end: 前一条边墙段终点（外轮廓线上）
+          - prev_end_inner: prev_end 沿前一条边内法线偏移 wt
+          - inner: 内缩多边形顶点（两条内偏移线的交点）
+          - next_start_inner: next_start 沿后一条边内法线偏移 wt
+          - next_start: 后一条边墙段起点（外轮廓线上）
+
+        对于90°角，prev_end_inner == inner == next_start_inner，
+        去重后退化为4个点（矩形截面 wt×wt）。
 
         Returns:
-            四个XZ坐标的列表（逆时针）
+            截面多边形顶点列表（顺时针，从外轮廓顶点开始）
         """
+        wt = wall_thickness
         outer = self.vertex(i)
-        inset = self.inset_polygon(wall_thickness)
+        inset = self.inset_polygon(wt)
         inner = inset.vertex(i)
 
-        # 前一条边的方向（从vertex(i-1)到vertex(i)）
+        # 前一条边和后一条边的几何属性
         d_prev = self.edge_direction(i - 1)
-        n_prev = self.edge_outward_normal(i - 1)
-
-        # 后一条边的方向（从vertex(i)到vertex(i+1)）
         d_next = self.edge_direction(i)
+        n_prev = self.edge_outward_normal(i - 1)
         n_next = self.edge_outward_normal(i)
 
-        # 前一条边内偏移后在顶点i处的端点
-        # = outer + 内法线prev * thickness
-        pt_prev = (outer[0] - n_prev[0] * wall_thickness,
-                   outer[1] - n_prev[1] * wall_thickness)
+        # 前一条边墙段终点（外轮廓线上）
+        # = outer - proj_end_prev * d_prev  (沿边的反方向退回转角柱投影)
+        # 等价于 wall_edge_start_point(i-1) + net_length * d_prev
+        # 简化计算：直接用 inner 在边方向上的投影
+        inner_start_prev = inset.vertex(i)  # inner 也是 edge(i-1) 的内缩终点
+        proj_end_prev = (
+            (inner_start_prev[0] - outer[0]) * (-d_prev[0]) +
+            (inner_start_prev[1] - outer[1]) * (-d_prev[1])
+        )
+        prev_end = (
+            outer[0] - d_prev[0] * proj_end_prev,
+            outer[1] - d_prev[1] * proj_end_prev,
+        )
 
-        # 后一条边内偏移后在顶点i处的端点
-        # = outer + 内法线next * thickness
-        pt_next = (outer[0] - n_next[0] * wall_thickness,
-                   outer[1] - n_next[1] * wall_thickness)
+        # 后一条边墙段起点（外轮廓线上）
+        proj_start_next = (
+            (inner[0] - outer[0]) * d_next[0] +
+            (inner[1] - outer[1]) * d_next[1]
+        )
+        next_start = (
+            outer[0] + d_next[0] * proj_start_next,
+            outer[1] + d_next[1] * proj_start_next,
+        )
 
-        return [outer, pt_next, inner, pt_prev]
+        # 内偏移端点
+        prev_end_inner = (
+            prev_end[0] - n_prev[0] * wt,
+            prev_end[1] - n_prev[1] * wt,
+        )
+        next_start_inner = (
+            next_start[0] - n_next[0] * wt,
+            next_start[1] - n_next[1] * wt,
+        )
+
+        # 构建原始6点序列（顺时针绕转角柱）
+        raw_pts = [outer, prev_end, prev_end_inner, inner,
+                   next_start_inner, next_start]
+
+        # 去重：相邻点距离 < epsilon 则合并
+        eps = 1e-6
+        deduped = [raw_pts[0]]
+        for j in range(1, len(raw_pts)):
+            dx = raw_pts[j][0] - deduped[-1][0]
+            dz = raw_pts[j][1] - deduped[-1][1]
+            if math.sqrt(dx * dx + dz * dz) > eps:
+                deduped.append(raw_pts[j])
+        # 检查首尾是否重复
+        if len(deduped) > 2:
+            dx = deduped[-1][0] - deduped[0][0]
+            dz = deduped[-1][1] - deduped[0][1]
+            if math.sqrt(dx * dx + dz * dz) < eps:
+                deduped.pop()
+
+        return deduped
+
+    def _corner_proj_signed(self, vertex_idx: int, edge_idx: int,
+                             wall_thickness: float) -> float:
+        """
+        计算顶点vertex_idx处转角柱在边edge_idx方向上的有符号投影。
+
+        正值 = 转角柱占用边的空间（凸角，墙段缩短）
+        负值 = 转角柱在边的延伸方向（凹角，墙段延长）
+        """
+        inset = self.inset_polygon(wall_thickness)
+        d = self.edge_direction(edge_idx)
+        outer = self.vertex(vertex_idx)
+        inner = inset.vertex(vertex_idx)
+
+        # inner相对于outer在边方向上的投影
+        return (
+            (inner[0] - outer[0]) * d[0] +
+            (inner[1] - outer[1]) * d[1]
+        )
 
     def wall_edge_net_length(self, i: int, wall_thickness: float) -> float:
         """
         第i条边扣除两端转角柱后的净墙段长度。
 
-        净长度 = 边长 - 两端转角柱在该边方向上的投影。
+        使用有符号投影：
+          - 凸角（<180°）：投影为正，墙段缩短
+          - 凹角（>180°）：投影为负，墙段延长
         """
+        # 起点处（顶点i）的投影
+        proj_start = self._corner_proj_signed(i, i, wall_thickness)
+
+        # 终点处（顶点i+1）的投影（注意终点用反方向）
         inset = self.inset_polygon(wall_thickness)
-
-        # 边的方向
         d = self.edge_direction(i)
-
-        # 起点处转角柱在边方向上的投影长度
-        outer_start = self.vertex(i)
-        inner_start = inset.vertex(i)
-        proj_start = abs(
-            (inner_start[0] - outer_start[0]) * d[0] +
-            (inner_start[1] - outer_start[1]) * d[1]
-        )
-
-        # 终点处转角柱在边方向上的投影长度
         outer_end = self.vertex(i + 1)
         inner_end = inset.vertex(i + 1)
-        proj_end = abs(
-            (inner_end[0] - outer_end[0]) * d[0] +
-            (inner_end[1] - outer_end[1]) * d[1]
+        proj_end = (
+            (inner_end[0] - outer_end[0]) * (-d[0]) +
+            (inner_end[1] - outer_end[1]) * (-d[1])
         )
 
         net = self.edge_length(i) - proj_start - proj_end
@@ -275,21 +341,13 @@ class BuildingFootprint:
         """
         第i条边的墙段起点（扣除起始转角柱后）。
 
-        墙段起点 = 外轮廓起点 + 转角柱投影长度 * 边方向
-        同时沿内法线偏移 thickness/2（墙体中心线）。
-
-        但实际上墙段在局部坐标系中生成，外表面Z=0对齐外轮廓。
-        所以起点就是沿边方向偏移转角柱投影后的外轮廓点。
+        使用有符号投影：
+          - 凸角：proj > 0，起点沿边方向前移
+          - 凹角：proj < 0，起点沿边方向后退（延伸）
         """
-        inset = self.inset_polygon(wall_thickness)
         d = self.edge_direction(i)
-
+        proj_start = self._corner_proj_signed(i, i, wall_thickness)
         outer_start = self.vertex(i)
-        inner_start = inset.vertex(i)
-        proj_start = (
-            (inner_start[0] - outer_start[0]) * d[0] +
-            (inner_start[1] - outer_start[1]) * d[1]
-        )
 
         return (
             outer_start[0] + proj_start * d[0],
