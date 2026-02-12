@@ -101,6 +101,12 @@ class BuildingConfig(PCGConfig):
     # 墙体随机化
     randomize_walls: bool = True    # 是否随机拼接墙体模块
 
+    # 分层外立面风格
+    facade_styles: dict = None      # 分层风格配置
+    # 格式一（区间模式）: {"lobby": "modern_glass", "low": "modern_mixed", "mid": "modern_glass", "high": "minimalist", "top": "classical"}
+    # 格式二（精确楼层）: {"floor_0": "modern_glass", "floor_1": "classical", "default": "modern_mixed"}
+    # 可用风格: default, modern_glass, modern_mixed, classical, industrial, minimalist, art_deco, brutalist
+
     # 性能参数
     use_instancing: bool = True     # 使用PointInstancer
     use_change_block: bool = True   # 使用SdfChangeBlock

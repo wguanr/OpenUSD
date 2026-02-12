@@ -33,7 +33,7 @@ from pcg_core.usd_bridge import UsdBridge
 from pcg_core.footprint import BuildingFootprint
 from pcg_core.wall_module import (
     IWallSegment, WallSegmentResult, WallLayout, WallEdge,
-    CornerJoiner90, CornerJoinerGeneric, IJoiner
+    CornerJoiner90, CornerJoinerGeneric, IJoiner, FacadeStyleRegistry
 )
 # 导入所有墙段类型以触发注册
 import pcg_core.wall_segments  # noqa: F401
@@ -187,18 +187,28 @@ class BuildingGenerator(GeneratorBase):
     # 墙体布局创建
     # =========================================================================
 
-    def _create_wall_layout(self, wall_height: float, is_lobby: bool = False) -> WallLayout:
+    def _create_wall_layout(self, wall_height: float, is_lobby: bool = False,
+                             floor_idx: int = 0) -> WallLayout:
         """
         根据配置和底面轮廓创建墙体布局。
 
         Args:
             wall_height: 墙体高度
             is_lobby: 是否为大厅层（大厅层使用不同的墙体配置）
+            floor_idx: 楼层索引（0-based），用于解析分层外立面风格
         """
         wt = self.cfg.wall_thickness
 
         if is_lobby:
             return self._create_lobby_wall_layout(wall_height)
+
+        # 解析该层的外立面风格
+        style_name = FacadeStyleRegistry.resolve_style_for_floor(
+            floor_idx=floor_idx,
+            facade_config=self.cfg.facade_styles,
+            lobby_floors=self._lobby_floors,
+            num_floors=self.cfg.num_floors,
+        )
 
         # 默认的窗户参数
         default_kwargs = {
@@ -242,6 +252,7 @@ class BuildingGenerator(GeneratorBase):
                 default_segment_type="WindowWall",
                 randomize=getattr(self.cfg, 'randomize_walls', True),
                 seed=self.cfg.seed,
+                style_name=style_name,
                 **default_kwargs,
             )
 
@@ -363,8 +374,8 @@ class BuildingGenerator(GeneratorBase):
             floor_path = f"{walls_root}/{floor_label}"
             self.bridge.define_xform(floor_path)
 
-            # 为这一层创建墙体布局
-            layout = self._create_wall_layout(wall_h, is_lobby=is_lobby)
+            # 为这一层创建墙体布局（传递floor_idx用于分层风格解析）
+            layout = self._create_wall_layout(wall_h, is_lobby=is_lobby, floor_idx=floor_idx)
 
             # 遍历每条边
             for edge in layout.edges:

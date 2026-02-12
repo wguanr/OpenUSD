@@ -330,6 +330,138 @@ class TJoiner(IJoiner):
 
 
 # =============================================================================
+# FacadeStyleRegistry: 外立面风格注册表
+# =============================================================================
+
+class FacadeStyleRegistry:
+    """
+    外立面风格注册表。
+
+    管理多种预定义的建筑外立面风格，每种风格定义了一组墙段类型的权重分布。
+    支持按楼层区间（大厅/低区/中区/高区/顶层）或按具体楼层指定风格。
+    """
+
+    # 预定义风格：{style_name: [(wall_type, weight), ...]}
+    BUILTIN_STYLES: Dict[str, List[Tuple[str, int]]] = {
+        "default": [
+            ("WindowWall", 40), ("SolidWall", 20), ("CurtainWall", 15),
+            ("LouverWall", 10), ("MixedWall", 10), ("DoorWall", 5),
+        ],
+        "modern_glass": [
+            ("CurtainWall", 50), ("RibbonWindowWall", 20),
+            ("PanelWall", 15), ("SolidWall", 15),
+        ],
+        "modern_mixed": [
+            ("WindowWall", 30), ("CurtainWall", 20), ("PanelWall", 20),
+            ("SpandrelWall", 15), ("SolidWall", 15),
+        ],
+        "classical": [
+            ("ColumnWall", 30), ("ArchWall", 25), ("BrickWall", 20),
+            ("WindowWall", 15), ("SolidWall", 10),
+        ],
+        "industrial": [
+            ("PanelWall", 35), ("LouverWall", 25), ("SolidWall", 20),
+            ("WindowWall", 15), ("DoorWall", 5),
+        ],
+        "minimalist": [
+            ("SolidWall", 35), ("RibbonWindowWall", 30),
+            ("WindowWall", 20), ("PanelWall", 15),
+        ],
+        "art_deco": [
+            ("SpandrelWall", 30), ("ColumnWall", 25), ("PanelWall", 20),
+            ("WindowWall", 15), ("SolidWall", 10),
+        ],
+        "brutalist": [
+            ("SolidWall", 40), ("WindowWall", 25), ("LouverWall", 20),
+            ("PanelWall", 15),
+        ],
+    }
+
+    # 区间名称到楼层范围的默认映射
+    DEFAULT_ZONE_RANGES = {
+        "lobby": (0, 0),       # 大厅层（由lobby_floors控制）
+        "low": (1, 5),         # 低区
+        "mid": (6, 15),        # 中区
+        "high": (16, 30),      # 高区
+        "top": (31, 999),      # 顶层/冠部
+    }
+
+    @classmethod
+    def get_style_weights(cls, style_name: str) -> List[Tuple[str, int]]:
+        """获取指定风格的墙段类型权重列表。"""
+        if style_name in cls.BUILTIN_STYLES:
+            return cls.BUILTIN_STYLES[style_name]
+        # 尝试解析自定义格式 "TypeA:30,TypeB:70"
+        try:
+            pairs = []
+            for item in style_name.split(","):
+                t, w = item.strip().split(":")
+                pairs.append((t.strip(), int(w.strip())))
+            return pairs
+        except Exception:
+            return cls.BUILTIN_STYLES["default"]
+
+    @classmethod
+    def resolve_style_for_floor(cls, floor_idx: int, facade_config: Optional[Dict[str, str]],
+                                 lobby_floors: int = 0, num_floors: int = 10) -> str:
+        """
+        根据楼层索引和外立面配置，解析该层应使用的风格名称。
+
+        支持两种配置格式：
+          1. 区间模式: {"lobby": "modern_glass", "low": "modern_mixed", ...}
+          2. 精确楼层模式: {"floor_0": "modern_glass", "floor_1": "classical", "default": "modern_mixed"}
+
+        Args:
+            floor_idx: 楼层索引（0-based）
+            facade_config: 外立面配置字典
+            lobby_floors: 大厅占几层
+            num_floors: 总楼层数
+
+        Returns:
+            风格名称字符串
+        """
+        if not facade_config:
+            return "default"
+
+        # 1. 精确楼层模式
+        floor_key = f"floor_{floor_idx}"
+        if floor_key in facade_config:
+            return facade_config[floor_key]
+
+        # 2. 区间模式
+        if floor_idx < lobby_floors and "lobby" in facade_config:
+            return facade_config["lobby"]
+
+        # 计算标准层索引（相对于大厅之上）
+        std_floor = floor_idx - lobby_floors if lobby_floors > 0 else floor_idx
+        total_std = num_floors - lobby_floors if lobby_floors > 0 else num_floors
+
+        # 顶层（最后1-2层）
+        if "top" in facade_config and std_floor >= total_std - 2 and total_std > 4:
+            return facade_config["top"]
+
+        # 高区
+        if "high" in facade_config and std_floor >= total_std * 0.6:
+            return facade_config["high"]
+
+        # 中区
+        if "mid" in facade_config and std_floor >= total_std * 0.3:
+            return facade_config["mid"]
+
+        # 低区
+        if "low" in facade_config:
+            return facade_config["low"]
+
+        # 默认
+        return facade_config.get("default", "default")
+
+    @classmethod
+    def register_style(cls, name: str, weights: List[Tuple[str, int]]) -> None:
+        """注册自定义风格。"""
+        cls.BUILTIN_STYLES[name] = weights
+
+
+# =============================================================================
 # WallEdge: 建筑的一条边
 # =============================================================================
 
@@ -472,6 +604,7 @@ class WallLayout:
                               default_segment_type: str = "WindowWall",
                               randomize: bool = False,
                               seed: int = 42,
+                              style_name: str = "default",
                               **default_segment_kwargs) -> WallLayout:
         """
         工厂方法：从 BuildingFootprint 创建墙体布局。
@@ -484,6 +617,7 @@ class WallLayout:
             wall_height: 墙体高度（单层净高）
             edge_configs: 每条边的墙段配置，键为边索引 {0: [...], 1: [...]}
             default_segment_type: 默认墙段类型
+            style_name: 外立面风格名称（用于随机填充时的墙段类型权重）
             **default_segment_kwargs: 默认墙段的额外参数
         """
         wt = wall_thickness
@@ -518,6 +652,7 @@ class WallLayout:
                             net_length, wall_height, wall_thickness,
                             edge_name, default_segment_kwargs,
                             seed=seed, edge_index=i,
+                            style_name=style_name,
                         )
                     else:
                         kwargs = {
@@ -543,27 +678,21 @@ class WallLayout:
                           wall_thickness: float, edge_name: str,
                           default_kwargs: dict,
                           seed: int = 42, edge_index: int = 0,
+                          style_name: str = "default",
                           ) -> List[IWallSegment]:
         """
         用随机规则填充一条边的墙段模块。
 
         策略：
           1. 将边分割为多个随机长度的墙段（每段 3~8m）
-          2. 每个墙段随机选择类型（带权重）
-          3. 确保每条边至少有一个窗墙或幕墙（保证采光）
-          4. 底层（通过edge_name判断）可能有门
+          2. 根据指定的外立面风格，按权重随机选择墙段类型
+          3. 确保每条边至少有一个采光墙段
+          4. 门墙需要足够的宽度
         """
         rng = random.Random(seed * 1000 + edge_index)
 
-        # 可用的墙段类型及其权重
-        wall_types_weights = [
-            ("WindowWall", 40),
-            ("SolidWall", 20),
-            ("CurtainWall", 15),
-            ("LouverWall", 10),
-            ("MixedWall", 10),
-            ("DoorWall", 5),
-        ]
+        # 从FacadeStyleRegistry获取当前风格的墙段类型权重
+        wall_types_weights = FacadeStyleRegistry.get_style_weights(style_name)
         types = [t for t, _ in wall_types_weights]
         weights = [w for _, w in wall_types_weights]
 
@@ -607,7 +736,10 @@ class WallLayout:
         # 确保至少有一个窗墙或幕墙（采光保证）
         has_window = any(
             isinstance(s, IWallSegment) and
-            getattr(s, '_type_name', '') in ('WindowWall', 'CurtainWall', 'MixedWall')
+            getattr(s, '_type_name', '') in (
+                'WindowWall', 'CurtainWall', 'MixedWall',
+                'SpandrelWall', 'RibbonWindowWall', 'ColumnWall', 'ArchWall'
+            )
             for s in segments
         )
         if not has_window and len(segments) > 0:

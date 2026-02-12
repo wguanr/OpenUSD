@@ -587,3 +587,455 @@ class MixedWallSegment(IWallSegment):
                 "split_height": sh,
             }
         )
+
+
+# =============================================================================
+# SpandrelWall: 裙墙/窗间墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("SpandrelWall")
+class SpandrelWallSegment(IWallSegment):
+    """
+    裙墙/窗间墙段：上下两条水平装饰带 + 中间玻璃区域。
+
+    常见于现代办公楼立面。上下的不透明裙板（spandrel panel）
+    遮挡楼板结构，中间是视觉玻璃区域。
+
+    占位符实现：三个水平分区方块。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "spandrel_wall",
+                 spandrel_ratio: float = 0.25,
+                 panel_color: Tuple[float, float, float] = (0.45, 0.45, 0.48),
+                 glass_color: Tuple[float, float, float] = (0.6, 0.75, 0.9),
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.spandrel_ratio = spandrel_ratio
+        self.panel_color = panel_color
+        self.glass_color = glass_color
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+        sr = self.spandrel_ratio
+
+        bottom_h = H * sr
+        top_h = H * sr
+        mid_h = H - bottom_h - top_h
+
+        # 底部裙板（不透明面板）
+        bridge.create_box_mesh(
+            f"{path}/BottomSpandrel",
+            width=L, height=bottom_h, depth=T,
+            translate=(L/2, bottom_h/2, T/2),
+            display_color=self.panel_color
+        )
+
+        # 中间玻璃区域
+        glass_t = 0.015
+        bridge.create_box_mesh(
+            f"{path}/GlassZone",
+            width=L, height=mid_h, depth=glass_t,
+            translate=(L/2, bottom_h + mid_h/2, T * 0.3),
+            display_color=self.glass_color
+        )
+
+        # 顶部裙板
+        bridge.create_box_mesh(
+            f"{path}/TopSpandrel",
+            width=L, height=top_h, depth=T,
+            translate=(L/2, bottom_h + mid_h + top_h/2, T/2),
+            display_color=self.panel_color
+        )
+
+        # 竖向分隔条
+        num_dividers = max(1, int(L / 2.0))
+        div_spacing = L / num_dividers
+        for i in range(num_dividers + 1):
+            x = i * div_spacing
+            bridge.create_box_mesh(
+                f"{path}/Divider_{i}",
+                width=0.05, height=mid_h, depth=T * 0.5,
+                translate=(x, bottom_h + mid_h/2, T * 0.15),
+                display_color=(0.3, 0.3, 0.32)
+            )
+
+        # 每个玻璃格子算一个窗户
+        win_positions = []
+        for i in range(num_dividers):
+            wx = (i + 0.5) * div_spacing
+            wy = bottom_h + mid_h / 2
+            win_positions.append((wx, wy, T * 0.3))
+
+        return WallSegmentResult(
+            window_positions=win_positions,
+            stats={"type": "SpandrelWall", "length": self.length,
+                   "num_windows": len(win_positions)}
+        )
+
+
+# =============================================================================
+# ColumnWall: 柱廊墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("ColumnWall")
+class ColumnWallSegment(IWallSegment):
+    """
+    柱廊墙段：带竖向柱子的墙体。
+
+    常见于古典/新古典风格建筑。柱子之间是凹进的墙面或窗户。
+
+    占位符实现：竖向方块柱子 + 凹进的背板。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "column_wall",
+                 column_width: float = 0.4,
+                 column_depth: float = 0.15,
+                 column_spacing: float = 3.0,
+                 column_color: Tuple[float, float, float] = (0.9, 0.88, 0.83),
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.column_width = column_width
+        self.column_depth = column_depth
+        self.column_spacing = column_spacing
+        self.column_color = column_color
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+
+        color = self.extra_params.get("color", (0.85, 0.82, 0.78))
+
+        # 背板（凹进的墙面）
+        back_t = T - self.column_depth
+        bridge.create_box_mesh(
+            f"{path}/BackPanel",
+            width=L, height=H, depth=back_t,
+            translate=(L/2, H/2, T/2 + self.column_depth/2),
+            display_color=color
+        )
+
+        # 柱子
+        num_cols = max(2, int(L / self.column_spacing) + 1)
+        col_spacing = L / (num_cols - 1) if num_cols > 1 else L
+
+        for i in range(num_cols):
+            x = i * col_spacing
+            bridge.create_box_mesh(
+                f"{path}/Column_{i}",
+                width=self.column_width, height=H, depth=T,
+                translate=(x, H/2, T/2),
+                display_color=self.column_color
+            )
+
+        # 柱间窗户
+        win_positions = []
+        for i in range(num_cols - 1):
+            wx = (i + 0.5) * col_spacing
+            wy = H * 0.5
+            win_positions.append((wx, wy, T * 0.3))
+
+        return WallSegmentResult(
+            window_positions=win_positions,
+            stats={"type": "ColumnWall", "length": self.length,
+                   "num_columns": num_cols, "num_windows": len(win_positions)}
+        )
+
+
+# =============================================================================
+# ArchWall: 拱形墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("ArchWall")
+class ArchWallSegment(IWallSegment):
+    """
+    拱形墙段：带拱形开口的墙体。
+
+    常见于欧式/古典建筑。拱形开口上方是实墙，下方是开口。
+
+    占位符实现：矩形开口 + 顶部半圆弧近似（用方块堆叠）。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "arch_wall",
+                 arch_width: float = 2.0,
+                 arch_height: float = 2.5,
+                 arch_spacing: float = 3.5,
+                 keystone_color: Tuple[float, float, float] = (0.8, 0.75, 0.65),
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.arch_width = arch_width
+        self.arch_height = arch_height
+        self.arch_spacing = arch_spacing
+        self.keystone_color = keystone_color
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+
+        color = self.extra_params.get("color", (0.85, 0.82, 0.78))
+
+        # 整体背板
+        bridge.create_box_mesh(
+            f"{path}/WallBody",
+            width=L, height=H, depth=T,
+            translate=(L/2, H/2, T/2),
+            display_color=color
+        )
+
+        # 拱形开口（用方块近似）
+        num_arches = max(1, int(L / self.arch_spacing))
+        arch_spacing = L / num_arches
+
+        win_positions = []
+        for i in range(num_arches):
+            cx = (i + 0.5) * arch_spacing
+            aw = min(self.arch_width, arch_spacing * 0.7)
+            ah = min(self.arch_height, H * 0.75)
+
+            # 矩形开口部分（用深色方块表示凹进）
+            bridge.create_box_mesh(
+                f"{path}/ArchOpening_{i}",
+                width=aw, height=ah, depth=T * 0.6,
+                translate=(cx, ah/2, T * 0.1),
+                display_color=(0.15, 0.15, 0.18)  # 深色表示开口
+            )
+
+            # 拱顶拱心石（keystone）
+            bridge.create_box_mesh(
+                f"{path}/Keystone_{i}",
+                width=aw * 0.2, height=aw * 0.15, depth=T * 0.3,
+                translate=(cx, ah + aw * 0.075, T * 0.05),
+                display_color=self.keystone_color
+            )
+
+            # 两侧柱头
+            for side, sx in [("L", cx - aw/2), ("R", cx + aw/2)]:
+                bridge.create_box_mesh(
+                    f"{path}/Capital_{i}_{side}",
+                    width=aw * 0.15, height=aw * 0.1, depth=T * 0.3,
+                    translate=(sx, ah, T * 0.05),
+                    display_color=self.keystone_color
+                )
+
+            win_positions.append((cx, ah * 0.5, T * 0.3))
+
+        return WallSegmentResult(
+            window_positions=win_positions,
+            stats={"type": "ArchWall", "length": self.length,
+                   "num_arches": num_arches}
+        )
+
+
+# =============================================================================
+# PanelWall: 金属/石材面板墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("PanelWall")
+class PanelWallSegment(IWallSegment):
+    """
+    面板墙段：预制金属或石材面板拼接。
+
+    常见于工业风/现代建筑。面板之间有可见的接缝。
+
+    占位符实现：网格化的方块面板，带接缝间隙。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "panel_wall",
+                 panel_width: float = 1.2,
+                 panel_height: float = 0.8,
+                 gap: float = 0.02,
+                 panel_color: Tuple[float, float, float] = (0.55, 0.55, 0.58),
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.panel_width = panel_width
+        self.panel_height = panel_height
+        self.gap = gap
+        self.panel_color = panel_color
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+
+        cols = max(1, int(L / self.panel_width))
+        rows = max(1, int(H / self.panel_height))
+        pw = L / cols
+        ph = H / rows
+        gap = self.gap
+
+        count = 0
+        for r in range(rows):
+            for c in range(cols):
+                cx = (c + 0.5) * pw
+                cy = (r + 0.5) * ph
+                bridge.create_box_mesh(
+                    f"{path}/Panel_{r}_{c}",
+                    width=pw - gap, height=ph - gap, depth=T,
+                    translate=(cx, cy, T/2),
+                    display_color=self.panel_color
+                )
+                count += 1
+
+        return WallSegmentResult(
+            stats={"type": "PanelWall", "length": self.length,
+                   "num_panels": count}
+        )
+
+
+# =============================================================================
+# BrickWall: 砖纹墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("BrickWall")
+class BrickWallSegment(IWallSegment):
+    """
+    砖纹墙段：带砖纹纹理的实墙。
+
+    常见于传统建筑。表面有砖块排列的纹理效果。
+
+    占位符实现：整体实墙 + 表面装饰条纹（水平线条模拟砖缝）。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "brick_wall",
+                 brick_color: Tuple[float, float, float] = (0.72, 0.38, 0.28),
+                 mortar_color: Tuple[float, float, float] = (0.8, 0.78, 0.75),
+                 course_height: float = 0.075,
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.brick_color = brick_color
+        self.mortar_color = mortar_color
+        self.course_height = course_height
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+
+        # 主体砖墙
+        bridge.create_box_mesh(
+            f"{path}/BrickBody",
+            width=L, height=H, depth=T,
+            translate=(L/2, H/2, T/2),
+            display_color=self.brick_color
+        )
+
+        # 水平砖缝线条（每隔 course_height 一条）
+        mortar_t = 0.005  # 砖缝厚度
+        num_courses = int(H / self.course_height)
+        for i in range(1, num_courses):
+            y = i * self.course_height
+            bridge.create_box_mesh(
+                f"{path}/HMortar_{i}",
+                width=L + 0.002, height=mortar_t, depth=0.002,
+                translate=(L/2, y, -0.001),  # 略微突出外表面
+                display_color=self.mortar_color
+            )
+
+        return WallSegmentResult(
+            stats={"type": "BrickWall", "length": self.length,
+                   "num_courses": num_courses}
+        )
+
+
+# =============================================================================
+# RibbonWindowWall: 带状窗墙（占位符）
+# =============================================================================
+
+@IWallSegment.register("RibbonWindowWall")
+class RibbonWindowWallSegment(IWallSegment):
+    """
+    带状窗墙段：水平连续的带状窗户。
+
+    常见于包豪斯/现代主义建筑。窗户水平连续延伸，
+    上下是实墙或裙板，中间是一整条水平玻璃带。
+
+    占位符实现：上下实墙方块 + 中间玻璃带方块。
+    """
+
+    def __init__(self, length: float, height: float, thickness: float,
+                 name: str = "ribbon_window",
+                 ribbon_bottom: float = 0.9,
+                 ribbon_height: float = 1.5,
+                 glass_color: Tuple[float, float, float] = (0.55, 0.7, 0.85),
+                 frame_color: Tuple[float, float, float] = (0.2, 0.2, 0.22),
+                 **kwargs):
+        super().__init__(length, height, thickness, name, **kwargs)
+        self.ribbon_bottom = ribbon_bottom
+        self.ribbon_height = min(ribbon_height, height - ribbon_bottom)
+        self.glass_color = glass_color
+        self.frame_color = frame_color
+
+    def generate_usd(self, bridge: 'UsdBridge', path: str) -> WallSegmentResult:
+        xform = bridge.define_xform(path)
+        L, H, T = self.length, self.height, self.thickness
+        rb = self.ribbon_bottom
+        rh = self.ribbon_height
+
+        color = self.extra_params.get("color", (0.85, 0.82, 0.78))
+
+        # 底部实墙（窗台以下）
+        if rb > 0.01:
+            bridge.create_box_mesh(
+                f"{path}/BottomWall",
+                width=L, height=rb, depth=T,
+                translate=(L/2, rb/2, T/2),
+                display_color=color
+            )
+
+        # 顶部实墙（窗户以上）
+        top_start = rb + rh
+        top_h = H - top_start
+        if top_h > 0.01:
+            bridge.create_box_mesh(
+                f"{path}/TopWall",
+                width=L, height=top_h, depth=T,
+                translate=(L/2, top_start + top_h/2, T/2),
+                display_color=color
+            )
+
+        # 水平玻璃带
+        glass_t = 0.015
+        bridge.create_box_mesh(
+            f"{path}/RibbonGlass",
+            width=L, height=rh, depth=glass_t,
+            translate=(L/2, rb + rh/2, T * 0.3),
+            display_color=self.glass_color
+        )
+
+        # 上下框架线条
+        frame_h = 0.04
+        for label, fy in [("TopFrame", rb + rh), ("BottomFrame", rb)]:
+            bridge.create_box_mesh(
+                f"{path}/{label}",
+                width=L, height=frame_h, depth=T * 0.5,
+                translate=(L/2, fy, T * 0.15),
+                display_color=self.frame_color
+            )
+
+        # 竖向分隔条（每2m一个）
+        num_dividers = max(1, int(L / 2.0))
+        div_spacing = L / num_dividers
+        for i in range(num_dividers + 1):
+            x = i * div_spacing
+            bridge.create_box_mesh(
+                f"{path}/VDivider_{i}",
+                width=0.03, height=rh, depth=T * 0.4,
+                translate=(x, rb + rh/2, T * 0.15),
+                display_color=self.frame_color
+            )
+
+        # 每个分隔区间算一个窗户
+        win_positions = []
+        for i in range(num_dividers):
+            wx = (i + 0.5) * div_spacing
+            wy = rb + rh / 2
+            win_positions.append((wx, wy, T * 0.3))
+
+        return WallSegmentResult(
+            window_positions=win_positions,
+            stats={"type": "RibbonWindowWall", "length": self.length,
+                   "num_windows": len(win_positions)}
+        )
