@@ -225,6 +225,8 @@ class BuildingGenerator(GeneratorBase):
                 wall_height=wall_height,
                 edge_configs=idx_configs,
                 default_segment_type="WindowWall",
+                randomize=getattr(self.cfg, 'randomize_walls', True),
+                seed=self.cfg.seed,
                 **default_kwargs,
             )
 
@@ -588,10 +590,12 @@ class BuildingGenerator(GeneratorBase):
                     rotate=(0, heading, 0),
                 )
                 # 在局部坐标系中创建墙段（X沿长度，Z沿厚度）
+                # 局部坐标原点在墙段起点，X沿长度方向，Z沿厚度方向
+                # Xform已经把原点放在了边的中点，所以局部坐标中墙段居中
                 self.bridge.create_box_mesh(
                     f"{parapet_path}/Geo",
                     width=net_len, height=ph, depth=wt,
-                    translate=(net_len / 2, 0, -wt / 2),  # 局部偏移使外表面对齐
+                    translate=(0, 0, -wt / 2),  # 居中放置，外表面对齐Z=0
                     display_color=self.cfg.roof_color,
                 )
 
@@ -609,21 +613,25 @@ class BuildingGenerator(GeneratorBase):
                 )
 
         # 屋顶板（带出挑）
-        overhang = 0.25
-        # 创建外扩的屋顶多边形
-        roof_footprint = self._footprint.inset_polygon(-overhang)
-        roof_verts = roof_footprint.vertices
-        roof_tris = roof_footprint.triangulate()
+        # 注意：楼板循环已经生成了顶层楼板（Slab_F{num_floors}），
+        # 这里只在有parapet时生成额外的出挑檐口板，位于parapet顶部
+        if self.cfg.roof_style == "parapet":
+            overhang = 0.25
+            roof_footprint = self._footprint.inset_polygon(-overhang)
+            roof_verts = roof_footprint.vertices
+            roof_tris = roof_footprint.triangulate()
 
-        self.bridge.create_polygon_slab(
-            f"{roof_root}/RoofSlab",
-            vertices_xz=roof_verts,
-            triangles=roof_tris,
-            thickness=0.15,
-            y_center=roof_slab_top + 0.075,
-            display_color=self.cfg.roof_color,
-        )
-        self.bridge.bind_material(f"{roof_root}/RoofSlab", f"{root}/Materials/RoofMaterial")
+            # 檐口板在女儿墙顶部
+            cap_y = roof_slab_top + self.cfg.parapet_height + 0.075
+            self.bridge.create_polygon_slab(
+                f"{roof_root}/RoofCap",
+                vertices_xz=roof_verts,
+                triangles=roof_tris,
+                thickness=0.15,
+                y_center=cap_y,
+                display_color=self.cfg.roof_color,
+            )
+            self.bridge.bind_material(f"{roof_root}/RoofCap", f"{root}/Materials/RoofMaterial")
 
     # =========================================================================
     # 光照

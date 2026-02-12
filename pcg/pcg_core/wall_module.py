@@ -23,6 +23,7 @@ Wall Module System: 墙体模块化拼接系统。
 
 from __future__ import annotations
 import math
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any, Type
@@ -469,6 +470,8 @@ class WallLayout:
                               wall_thickness: float, wall_height: float,
                               edge_configs: Optional[Dict[int, List[Dict]]] = None,
                               default_segment_type: str = "WindowWall",
+                              randomize: bool = False,
+                              seed: int = 42,
                               **default_segment_kwargs) -> WallLayout:
         """
         工厂方法：从 BuildingFootprint 创建墙体布局。
@@ -510,14 +513,21 @@ class WallLayout:
                     segments.append(IWallSegment.create(seg_type, **seg_cfg))
             else:
                 if net_length > 0.1:  # 边太短则跳过
-                    kwargs = {
-                        "length": net_length,
-                        "height": wall_height,
-                        "thickness": wall_thickness,
-                        "name": f"{edge_name}_default",
-                    }
-                    kwargs.update(default_segment_kwargs)
-                    segments.append(IWallSegment.create(default_segment_type, **kwargs))
+                    if randomize:
+                        segments = cls._random_fill_edge(
+                            net_length, wall_height, wall_thickness,
+                            edge_name, default_segment_kwargs,
+                            seed=seed, edge_index=i,
+                        )
+                    else:
+                        kwargs = {
+                            "length": net_length,
+                            "height": wall_height,
+                            "thickness": wall_thickness,
+                            "name": f"{edge_name}_default",
+                        }
+                        kwargs.update(default_segment_kwargs)
+                        segments.append(IWallSegment.create(default_segment_type, **kwargs))
 
             edges.append(WallEdge(
                 name=edge_name,
@@ -527,3 +537,92 @@ class WallLayout:
             ))
 
         return cls(edges=edges, joiner=CornerJoinerGeneric())
+
+    @classmethod
+    def _random_fill_edge(cls, total_length: float, wall_height: float,
+                          wall_thickness: float, edge_name: str,
+                          default_kwargs: dict,
+                          seed: int = 42, edge_index: int = 0,
+                          ) -> List[IWallSegment]:
+        """
+        用随机规则填充一条边的墙段模块。
+
+        策略：
+          1. 将边分割为多个随机长度的墙段（每段 3~8m）
+          2. 每个墙段随机选择类型（带权重）
+          3. 确保每条边至少有一个窗墙或幕墙（保证采光）
+          4. 底层（通过edge_name判断）可能有门
+        """
+        rng = random.Random(seed * 1000 + edge_index)
+
+        # 可用的墙段类型及其权重
+        wall_types_weights = [
+            ("WindowWall", 40),
+            ("SolidWall", 20),
+            ("CurtainWall", 15),
+            ("LouverWall", 10),
+            ("MixedWall", 10),
+            ("DoorWall", 5),
+        ]
+        types = [t for t, _ in wall_types_weights]
+        weights = [w for _, w in wall_types_weights]
+
+        # 分割边为多个墙段
+        min_seg_len = 3.0
+        max_seg_len = 8.0
+
+        segments = []
+        remaining = total_length
+
+        while remaining > 0.5:
+            if remaining <= max_seg_len:
+                seg_len = remaining
+            else:
+                seg_len = rng.uniform(min_seg_len, min(max_seg_len, remaining - min_seg_len))
+                seg_len = round(seg_len, 2)
+
+            # 随机选择墙段类型
+            seg_type = rng.choices(types, weights=weights, k=1)[0]
+
+            # 门墙需要足够的宽度
+            if seg_type == "DoorWall" and seg_len < 2.5:
+                seg_type = "SolidWall"
+
+            # 构建参数
+            kwargs = {
+                "length": seg_len,
+                "height": wall_height,
+                "thickness": wall_thickness,
+                "name": f"{edge_name}_seg{len(segments)}",
+            }
+            # 从默认参数中复制窗户相关参数
+            for k in ["window_width", "window_height", "window_sill_height",
+                      "window_spacing", "color"]:
+                if k in default_kwargs:
+                    kwargs[k] = default_kwargs[k]
+
+            segments.append(IWallSegment.create(seg_type, **kwargs))
+            remaining -= seg_len
+
+        # 确保至少有一个窗墙或幕墙（采光保证）
+        has_window = any(
+            isinstance(s, IWallSegment) and
+            getattr(s, '_type_name', '') in ('WindowWall', 'CurtainWall', 'MixedWall')
+            for s in segments
+        )
+        if not has_window and len(segments) > 0:
+            # 把第一个墙段替换为窗墙
+            old = segments[0]
+            kwargs = {
+                "length": old.length,
+                "height": old.height,
+                "thickness": old.thickness,
+                "name": old.name,
+            }
+            for k in ["window_width", "window_height", "window_sill_height",
+                      "window_spacing", "color"]:
+                if k in default_kwargs:
+                    kwargs[k] = default_kwargs[k]
+            segments[0] = IWallSegment.create("WindowWall", **kwargs)
+
+        return segments

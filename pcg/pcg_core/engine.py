@@ -90,6 +90,9 @@ class BuildingConfig(PCGConfig):
     room_max_width: float = 8.0     # 最大房间宽度
     interior_wall_thickness: float = 0.15
 
+    # 墙体随机化
+    randomize_walls: bool = True    # 是否随机拼接墙体模块
+
     # 性能参数
     use_instancing: bool = True     # 使用PointInstancer
     use_change_block: bool = True   # 使用SdfChangeBlock
