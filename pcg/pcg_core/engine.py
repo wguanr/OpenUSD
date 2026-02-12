@@ -121,6 +121,116 @@ class BuildingConfig(PCGConfig):
     lod_level: int = 1              # LOD级别 (0=低, 1=中, 2=高)
 
 
+# =============================================================================
+# 户型单元配置
+# =============================================================================
+
+@dataclass
+class UnitConfig:
+    """单个户型单元的配置。"""
+    unit_type: str = "3BR"           # "1BR"/"2BR"/"3BR"/"4BR" (几室)
+    unit_width: float = 0.0          # 户型面宽(米)，0=自动计算
+    num_bedrooms: int = 3            # 卧室数
+    num_living_rooms: int = 1        # 客厅数
+    has_balcony: bool = True         # 是否有南向阳台
+    balcony_bays: int = 2            # 阳台占几个开间
+    num_ac_units: int = 3            # 空调机位数
+
+    @staticmethod
+    def preset(unit_type: str) -> "UnitConfig":
+        """根据户型类型返回预设配置。"""
+        presets = {
+            "1BR": UnitConfig(unit_type="1BR", unit_width=8.0,  num_bedrooms=1, num_living_rooms=1, balcony_bays=1, num_ac_units=2),
+            "2BR": UnitConfig(unit_type="2BR", unit_width=10.0, num_bedrooms=2, num_living_rooms=1, balcony_bays=2, num_ac_units=3),
+            "3BR": UnitConfig(unit_type="3BR", unit_width=12.0, num_bedrooms=3, num_living_rooms=1, balcony_bays=2, num_ac_units=4),
+            "4BR": UnitConfig(unit_type="4BR", unit_width=14.0, num_bedrooms=4, num_living_rooms=2, balcony_bays=3, num_ac_units=5),
+        }
+        return presets.get(unit_type, presets["3BR"])
+
+
+@dataclass
+class ResidentialConfig(PCGConfig):
+    """
+    中国住宅小区商品房生成配置。
+
+    核心概念：
+      - 板楼(slab): 南北朝向的长条形建筑，一梯两户为主，南北通透
+      - 塔楼(tower): 近正方形平面，一梯多户（4-6户），中央核心筒
+      - 户型单元(unit): 以"几室几厅"为基本单位的重复模块
+      - 核心筒(core): 楼梯间+电梯间的公共交通区域
+    """
+    # ── 建筑整体参数 ──
+    building_name: str = "ResidentialBuilding"
+    building_type: str = "slab"      # "slab"(板楼) / "tower"(塔楼)
+    num_floors: int = 18             # 总层数
+    floor_height: float = 2.9        # 标准层高(米)
+    building_depth: float = 13.0     # 建筑进深(米) - 南北方向
+
+    # ── 户型配置 ──
+    units_per_floor: int = 2         # 每层户数
+    unit_types: list = None          # 每户的户型类型列表, 如 ["3BR", "2BR"]
+    # 如果为None，自动根据units_per_floor生成默认配置
+
+    # ── 核心筒参数 ──
+    core_width: float = 4.0          # 核心筒面宽(米)
+    core_depth: float = 0.0          # 核心筒进深(米)，0=与建筑进深相同
+    num_elevators: int = 1           # 电梯数量
+    staircase_width: float = 2.6     # 楼梯间宽度
+
+    # ── 外墙参数 ──
+    wall_thickness: float = 0.25     # 外墙厚度
+    wall_color: tuple = (0.88, 0.85, 0.78)   # 外墙颜色（暖白色）
+    accent_color: tuple = (0.55, 0.45, 0.35)  # 点缀色（深棕色线条）
+    floor_line_color: tuple = (0.6, 0.58, 0.55)  # 楼层分隔线颜色
+
+    # ── 窗户参数 ──
+    south_window_width: float = 2.0   # 南向窗宽(客厅/卧室)
+    south_window_height: float = 1.8  # 南向窗高
+    north_window_width: float = 1.2   # 北向窗宽(厨房/卫生间)
+    north_window_height: float = 1.0  # 北向窗高
+    window_sill_height: float = 0.9   # 窗台高度
+    window_color: tuple = (0.55, 0.7, 0.85)  # 窗户颜色(浅蓝玻璃)
+
+    # ── 阳台参数 ──
+    balcony_depth: float = 1.5       # 阳台进深(米)
+    balcony_railing_height: float = 1.1  # 阳台栏杆高度
+    balcony_type: str = "enclosed"   # "open"(开放) / "enclosed"(封闭)
+    balcony_glass_color: tuple = (0.65, 0.78, 0.88)  # 封闭阳台玻璃颜色
+    balcony_slab_color: tuple = (0.75, 0.73, 0.70)   # 阳台板颜色
+
+    # ── 空调机位参数 ──
+    ac_unit_width: float = 0.9       # 空调机位宽度
+    ac_unit_depth: float = 0.45      # 空调机位深度(外挑)
+    ac_unit_height: float = 0.6      # 空调机位高度
+    ac_unit_color: tuple = (0.7, 0.68, 0.65)  # 空调机位颜色(灰色格栅)
+
+    # ── 底商参数 ──
+    has_ground_commercial: bool = False  # 是否有底商
+    commercial_floors: int = 1       # 底商层数
+    commercial_height: float = 4.0   # 底商层高(米)
+    shopfront_color: tuple = (0.3, 0.3, 0.32)  # 店面颜色(深色)
+
+    # ── 入口参数 ──
+    entrance_width: float = 3.0      # 入口门宽
+    entrance_height: float = 3.0     # 入口门高
+    has_entrance_canopy: bool = True  # 是否有入口雨棚
+    canopy_depth: float = 2.0        # 雨棚出挑深度
+
+    # ── 屋顶参数 ──
+    roof_style: str = "flat"         # "flat"(平顶) / "pitched"(坡屋顶)
+    parapet_height: float = 1.2      # 女儿墙高度
+    roof_color: tuple = (0.5, 0.48, 0.45)
+    pitch_angle: float = 25.0        # 坡屋顶角度(度)
+    pitched_roof_color: tuple = (0.45, 0.25, 0.15)  # 坡屋顶颜色(红棕色)
+
+    # ── 楼板参数 ──
+    floor_thickness: float = 0.2     # 楼板厚度
+    floor_color: tuple = (0.7, 0.7, 0.72)
+
+    # ── 性能参数 ──
+    use_instancing: bool = True
+
+
 class GeneratorBase:
     """生成器基类。"""
 
