@@ -90,6 +90,14 @@ class BuildingConfig(PCGConfig):
     room_max_width: float = 8.0     # 最大房间宽度
     interior_wall_thickness: float = 0.15
 
+    # 大厅层参数
+    lobby_floors: int = 1           # 大厅占几层（1=单层大厅, 2=双层通高大厅, 0=无大厅）
+    lobby_height: float = 0.0       # 大厅总高度(米)，0=自动计算(lobby_floors * floor_height)
+    lobby_wall_type: str = "CurtainWall"  # 大厅外墙默认类型
+    lobby_has_entrance: bool = True  # 大厅是否有入口门
+    lobby_entrance_edges: list = None  # 哪些边有入口（默认[0]即前墙）
+    lobby_color: tuple = (0.88, 0.86, 0.82)  # 大厅墙体颜色（略浅于标准层）
+
     # 墙体随机化
     randomize_walls: bool = True    # 是否随机拼接墙体模块
 

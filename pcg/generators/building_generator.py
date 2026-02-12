@@ -164,6 +164,21 @@ class BuildingGenerator(GeneratorBase):
 
         self._wall_net_height = H - ft
 
+        # 大厅层高计算
+        lobby_floors = max(0, self.cfg.lobby_floors)
+        if lobby_floors > 0:
+            if self.cfg.lobby_height > 0:
+                self._lobby_total_height = self.cfg.lobby_height
+            else:
+                self._lobby_total_height = lobby_floors * H
+            self._lobby_wall_height = self._lobby_total_height - ft
+        else:
+            self._lobby_total_height = 0.0
+            self._lobby_wall_height = 0.0
+
+        self._lobby_floors = lobby_floors
+        self._entrance_edges = self.cfg.lobby_entrance_edges or [0]
+
         # 全局窗户位置收集器（世界坐标）
         self._all_window_positions: List[Tuple[float, float, float]] = []
         self._all_window_orientations: List[Tuple[float, float, float, float]] = []
@@ -172,14 +187,18 @@ class BuildingGenerator(GeneratorBase):
     # 墙体布局创建
     # =========================================================================
 
-    def _create_wall_layout(self, wall_height: float) -> WallLayout:
+    def _create_wall_layout(self, wall_height: float, is_lobby: bool = False) -> WallLayout:
         """
         根据配置和底面轮廓创建墙体布局。
 
-        对于矩形底面，使用传统的 create_rectangular 方法（保持向后兼容）。
-        对于多边形底面，使用新的 create_from_footprint 方法。
+        Args:
+            wall_height: 墙体高度
+            is_lobby: 是否为大厅层（大厅层使用不同的墙体配置）
         """
         wt = self.cfg.wall_thickness
+
+        if is_lobby:
+            return self._create_lobby_wall_layout(wall_height)
 
         # 默认的窗户参数
         default_kwargs = {
@@ -194,7 +213,6 @@ class BuildingGenerator(GeneratorBase):
         edge_configs = getattr(self.cfg, 'wall_layout', None)
 
         if self.cfg.footprint_type == "rectangle" and edge_configs:
-            # 矩形 + 自定义边配置 → 使用传统方法
             layout = WallLayout.create_rectangular(
                 width=self.cfg.building_width,
                 depth=self.cfg.building_depth,
@@ -205,11 +223,8 @@ class BuildingGenerator(GeneratorBase):
                 **default_kwargs,
             )
         else:
-            # 通用多边形路径
-            # 将 edge_configs 从 name-based 转换为 index-based（如果有的话）
             idx_configs = None
             if edge_configs and isinstance(edge_configs, dict):
-                # 尝试将 "edge_0", "edge_1" 等转换为整数键
                 idx_configs = {}
                 for k, v in edge_configs.items():
                     if k.startswith("edge_"):
@@ -232,6 +247,76 @@ class BuildingGenerator(GeneratorBase):
 
         return layout
 
+    def _create_lobby_wall_layout(self, wall_height: float) -> WallLayout:
+        """
+        创建大厅层专用的墙体布局。
+
+        大厅层特征：
+          - 默认使用大面积玻璃幕墙（CurtainWall）
+          - 入口边包含门墙（DoorWall）
+          - 不使用随机拼接，而是确定性的大厅布局
+        """
+        wt = self.cfg.wall_thickness
+        lobby_wall_type = self.cfg.lobby_wall_type  # 默认 "CurtainWall"
+        entrance_edges = self._entrance_edges  # 默认 [0]
+
+        default_kwargs = {
+            "window_width": self.cfg.window_width,
+            "window_height": min(self.cfg.window_height, wall_height * 0.6),
+            "window_sill_height": self.cfg.window_sill_height,
+            "window_spacing": self.cfg.window_spacing,
+            "color": self.cfg.lobby_color,
+        }
+
+        # 为每条边构建配置
+        edge_configs = {}
+        for i in range(self._footprint.num_edges):
+            net_len = self._footprint.wall_edge_net_length(i, wt)
+            if net_len < 0.5:
+                continue
+
+            if self.cfg.lobby_has_entrance and i in entrance_edges:
+                # 入口边：幕墙 + 门墙 + 幕墙
+                door_len = max(3.0, min(5.0, net_len * 0.25))  # 门墙占边长的25%，3~5m
+                side_len = (net_len - door_len) / 2
+
+                segs = []
+                if side_len > 0.5:
+                    segs.append({
+                        "type": lobby_wall_type,
+                        "length": side_len,
+                    })
+                segs.append({
+                    "type": "DoorWall",
+                    "length": door_len,
+                })
+                if side_len > 0.5:
+                    segs.append({
+                        "type": lobby_wall_type,
+                        "length": side_len,
+                    })
+                edge_configs[i] = segs
+            else:
+                # 非入口边：整条幕墙
+                edge_configs[i] = [{
+                    "type": lobby_wall_type,
+                    "length": net_len,
+                }]
+
+        # 使用 create_from_footprint 并传入确定性配置
+        layout = WallLayout.create_from_footprint(
+            footprint=self._footprint,
+            wall_thickness=wt,
+            wall_height=wall_height,
+            edge_configs=edge_configs,
+            default_segment_type=lobby_wall_type,
+            randomize=False,  # 大厅层不随机
+            seed=self.cfg.seed,
+            **default_kwargs,
+        )
+
+        return layout
+
     # =========================================================================
     # 模块化外墙生成
     # =========================================================================
@@ -240,11 +325,9 @@ class BuildingGenerator(GeneratorBase):
         """
         使用模块化拼接系统生成所有外墙。
 
-        对每一层楼：
-          1. 创建该层的 WallLayout（基于 Footprint）
-          2. 遍历每条边，沿边依次放置墙段模块
-          3. 通过 Xform 变换将墙段从局部坐标映射到世界坐标
-          4. 收集窗户位置用于后续 PointInstancer 生成
+        区分大厅层和标准层：
+          - 大厅层：使用幕墙+门墙的确定性布局，层高可能更高
+          - 标准层：使用随机墙体模块拼接
         """
         walls_root = f"{root}/ExteriorWalls"
         self.bridge.define_scope(walls_root)
@@ -252,41 +335,54 @@ class BuildingGenerator(GeneratorBase):
         wt = self.cfg.wall_thickness
         H = self.cfg.floor_height
         ft = self.cfg.floor_thickness
+        lobby_floors = self._lobby_floors
 
         total_segments = 0
         total_windows_in_walls = 0
 
-        for floor_idx in range(self.cfg.num_floors):
-            wall_bottom_y = floor_idx * H
-            wall_h = H - ft
+        # 构建楼层信息列表: (floor_idx, wall_bottom_y, wall_height, is_lobby)
+        floor_infos = []
 
-            floor_path = f"{walls_root}/Floor_{floor_idx}"
+        if lobby_floors > 0:
+            # 大厅层（可能是通高的）
+            lobby_wall_h = self._lobby_wall_height
+            floor_infos.append((0, 0.0, lobby_wall_h, True))
+
+            # 标准层
+            for i in range(lobby_floors, self.cfg.num_floors):
+                std_bottom = self._lobby_total_height + (i - lobby_floors) * H
+                std_wall_h = H - ft
+                floor_infos.append((i, std_bottom, std_wall_h, False))
+        else:
+            # 无大厅：所有楼层统一处理
+            for i in range(self.cfg.num_floors):
+                floor_infos.append((i, i * H, H - ft, False))
+
+        for floor_idx, wall_bottom_y, wall_h, is_lobby in floor_infos:
+            floor_label = "Lobby" if is_lobby else f"Floor_{floor_idx}"
+            floor_path = f"{walls_root}/{floor_label}"
             self.bridge.define_xform(floor_path)
 
             # 为这一层创建墙体布局
-            layout = self._create_wall_layout(wall_h)
+            layout = self._create_wall_layout(wall_h, is_lobby=is_lobby)
 
             # 遍历每条边
             for edge in layout.edges:
                 edge_path = f"{floor_path}/Edge_{edge.name}"
                 self.bridge.define_xform(edge_path)
 
-                # 计算这条边的起点世界坐标和方向
-                sx, sz = edge.start_point  # XZ平面上的起点
-                dx, dz = edge.direction     # 单位方向向量
-                nx, nz = edge.outward_normal  # 外法线
+                sx, sz = edge.start_point
+                dx, dz = edge.direction
+                nx, nz = edge.outward_normal
 
-                # 沿这条边的累积偏移
                 cursor = 0.0
 
                 for seg_idx, segment in enumerate(edge.segments):
                     seg_path = f"{edge_path}/Seg_{seg_idx}_{segment.name}"
 
-                    # 计算墙段起点的世界坐标
                     world_x = sx + dx * cursor
                     world_z = sz + dz * cursor
 
-                    # 创建 Xform 节点，将墙段从局部坐标映射到世界坐标
                     heading = edge.heading_angle_deg()
 
                     xform = self.bridge.define_xform(
@@ -295,22 +391,17 @@ class BuildingGenerator(GeneratorBase):
                         rotate=(0, heading, 0),
                     )
 
-                    # 生成墙段几何体（在局部坐标系中）
                     result = segment.generate_usd(self.bridge, f"{seg_path}/Geo")
 
-                    # 将局部窗户位置转换为世界坐标
                     for lx, ly, lz in result.window_positions:
                         rad = math.radians(heading)
                         cos_a = math.cos(rad)
                         sin_a = math.sin(rad)
-                        # Y轴旋转矩阵: [cos, 0, sin; 0, 1, 0; -sin, 0, cos]
                         wx = world_x + lx * cos_a + lz * sin_a
                         wz = world_z + lx * (-sin_a) + lz * cos_a
                         wy = wall_bottom_y + ly
 
                         self._all_window_positions.append((wx, wy, wz))
-
-                        # 计算窗户朝向（四元数）
                         quat = self._heading_to_quaternion(heading)
                         self._all_window_orientations.append(quat)
 
@@ -322,6 +413,7 @@ class BuildingGenerator(GeneratorBase):
         return {
             "num_wall_segments": total_segments,
             "num_window_holes": total_windows_in_walls,
+            "lobby_floors": lobby_floors,
         }
 
     def _heading_to_quaternion(self, heading_deg: float) -> Tuple[float, float, float, float]:
@@ -393,38 +485,73 @@ class BuildingGenerator(GeneratorBase):
             diffuse_color=(0.75, 0.73, 0.70), roughness=0.4, metallic=0.0)
         self.bridge.create_material(f"{mat_root}/CornerMaterial",
             diffuse_color=(0.80, 0.77, 0.73), roughness=0.8, metallic=0.0)
+        # 大厅材质
+        self.bridge.create_material(f"{mat_root}/LobbyWallMaterial",
+            diffuse_color=self.cfg.lobby_color, roughness=0.6, metallic=0.0)
+        self.bridge.create_material(f"{mat_root}/LobbyGlassMaterial",
+            diffuse_color=(0.5, 0.7, 0.85), roughness=0.05, metallic=0.1, opacity=0.25)
+        self.bridge.create_material(f"{mat_root}/LobbyFloorMaterial",
+            diffuse_color=(0.82, 0.78, 0.72), roughness=0.3, metallic=0.05)
 
     # =========================================================================
     # 楼板生成（多边形版）
     # =========================================================================
 
     def _generate_floor_slabs(self, root: str) -> int:
-        """生成所有楼层的楼板（支持多边形底面）。"""
+        """生成所有楼层的楼板（支持多边形底面和双层通高大厅）。"""
         floors_root = f"{root}/FloorSlabs"
         self.bridge.define_scope(floors_root)
 
         ft = self.cfg.floor_thickness
         H = self.cfg.floor_height
+        lobby_floors = self._lobby_floors
 
         # 获取多边形顶点和三角化
         verts = self._footprint.vertices
         triangles = self._footprint.triangulate()
 
-        num_slabs = 0
+        # 计算每层楼板的Y坐标
+        # 大厅层：如果双层通高，跳过中间楼板
+        slab_y_positions = []  # (floor_idx, slab_top_y, material_suffix)
+
         for floor_idx in range(self.cfg.num_floors + 1):
-            slab_top_y = floor_idx * H
+            # 双层通高大厅：跳过 F1 到 F(lobby_floors-1) 的中间楼板
+            if lobby_floors > 1 and 0 < floor_idx < lobby_floors:
+                continue  # 跳过中间楼板
+
+            if floor_idx < lobby_floors:
+                # 大厅地面板
+                slab_y_positions.append((floor_idx, floor_idx * H, "LobbyFloorMaterial"))
+            elif floor_idx == lobby_floors and lobby_floors > 0:
+                # 大厅顶部楼板（也是标准层的地面）
+                slab_top_y = self._lobby_total_height
+                slab_y_positions.append((floor_idx, slab_top_y, "FloorMaterial"))
+            else:
+                # 标准层楼板
+                if lobby_floors > 0:
+                    slab_top_y = self._lobby_total_height + (floor_idx - lobby_floors) * H
+                else:
+                    slab_top_y = floor_idx * H
+                slab_y_positions.append((floor_idx, slab_top_y, "FloorMaterial"))
+
+        num_slabs = 0
+        for floor_idx, slab_top_y, mat_name in slab_y_positions:
             slab_center_y = slab_top_y - ft / 2
 
             slab_path = f"{floors_root}/Slab_F{floor_idx}"
+            color = self.cfg.floor_color
+            if "Lobby" in mat_name:
+                color = (0.82, 0.78, 0.72)  # 大厅地面颜色
+
             self.bridge.create_polygon_slab(
                 slab_path,
                 vertices_xz=verts,
                 triangles=triangles,
                 thickness=ft,
                 y_center=slab_center_y,
-                display_color=self.cfg.floor_color,
+                display_color=color,
             )
-            self.bridge.bind_material(slab_path, f"{root}/Materials/FloorMaterial")
+            self.bridge.bind_material(slab_path, f"{root}/Materials/{mat_name}")
             num_slabs += 1
 
         return num_slabs
@@ -434,7 +561,7 @@ class BuildingGenerator(GeneratorBase):
     # =========================================================================
 
     def _generate_corner_columns(self, root: str) -> int:
-        """生成所有转角柱（支持任意角度）。"""
+        """生成所有转角柱（支持任意角度，大厅层和标准层分段）。"""
         corners_root = f"{root}/CornerColumns"
         self.bridge.define_scope(corners_root)
 
@@ -442,31 +569,60 @@ class BuildingGenerator(GeneratorBase):
         H = self.cfg.floor_height
         ft = self.cfg.floor_thickness
         num_floors = self.cfg.num_floors
-
-        column_bottom_y = 0.0
-        column_top_y = num_floors * H - ft
-        column_height = column_top_y - column_bottom_y
+        lobby_floors = self._lobby_floors
 
         joiner = CornerJoinerGeneric()
         count = 0
 
+        # 计算建筑总高
+        if lobby_floors > 0:
+            building_top = self._lobby_total_height + (num_floors - lobby_floors) * H
+        else:
+            building_top = num_floors * H
+
         for i in range(self._footprint.num_vertices):
-            # 获取该顶点处的转角柱截面
             quad = self._footprint.corner_quad(i, wt)
-            angle = self._footprint.interior_angle_deg(i)
 
-            col_path = f"{corners_root}/Corner_{i}"
+            if lobby_floors > 0:
+                # 大厅层转角柱（从地面到大厅顶部）
+                lobby_col_path = f"{corners_root}/Corner_{i}_Lobby"
+                lobby_top = self._lobby_total_height - ft
+                joiner.generate_usd_with_quad(
+                    self.bridge, lobby_col_path,
+                    quad_xz=quad,
+                    y_bottom=0.0,
+                    y_top=lobby_top,
+                    display_color=self.cfg.lobby_color,
+                )
+                self.bridge.bind_material(lobby_col_path, f"{root}/Materials/LobbyWallMaterial")
+                count += 1
 
-            # 使用精确的四边形截面生成转角柱
-            joiner.generate_usd_with_quad(
-                self.bridge, col_path,
-                quad_xz=quad,
-                y_bottom=column_bottom_y,
-                y_top=column_top_y,
-                display_color=(0.80, 0.77, 0.73),
-            )
-            self.bridge.bind_material(col_path, f"{root}/Materials/CornerMaterial")
-            count += 1
+                # 标准层转角柱（从大厅顶部到建筑顶部）
+                if num_floors > lobby_floors:
+                    std_col_path = f"{corners_root}/Corner_{i}_Std"
+                    std_bottom = self._lobby_total_height
+                    std_top = building_top - ft
+                    joiner.generate_usd_with_quad(
+                        self.bridge, std_col_path,
+                        quad_xz=quad,
+                        y_bottom=std_bottom,
+                        y_top=std_top,
+                        display_color=(0.80, 0.77, 0.73),
+                    )
+                    self.bridge.bind_material(std_col_path, f"{root}/Materials/CornerMaterial")
+                    count += 1
+            else:
+                # 无大厅：整体转角柱
+                col_path = f"{corners_root}/Corner_{i}"
+                joiner.generate_usd_with_quad(
+                    self.bridge, col_path,
+                    quad_xz=quad,
+                    y_bottom=0.0,
+                    y_top=building_top - ft,
+                    display_color=(0.80, 0.77, 0.73),
+                )
+                self.bridge.bind_material(col_path, f"{root}/Materials/CornerMaterial")
+                count += 1
 
         return count
 
@@ -558,7 +714,13 @@ class BuildingGenerator(GeneratorBase):
         wt = self.cfg.wall_thickness
         H = self.cfg.floor_height
         num_floors = self.cfg.num_floors
-        roof_slab_top = num_floors * H
+        lobby_floors = self._lobby_floors
+
+        # 计算屋顶板顶面Y坐标
+        if lobby_floors > 0:
+            roof_slab_top = self._lobby_total_height + (num_floors - lobby_floors) * H
+        else:
+            roof_slab_top = num_floors * H
 
         if self.cfg.roof_style == "parapet":
             ph = self.cfg.parapet_height
@@ -643,7 +805,10 @@ class BuildingGenerator(GeneratorBase):
         self.bridge.define_scope(lights_root)
         self.bridge.create_dome_light(f"{lights_root}/DomeLight", intensity=0.5)
 
-        total_h = self.cfg.num_floors * self.cfg.floor_height
+        if self._lobby_floors > 0:
+            total_h = self._lobby_total_height + (self.cfg.num_floors - self._lobby_floors) * self.cfg.floor_height
+        else:
+            total_h = self.cfg.num_floors * self.cfg.floor_height
         bbox = self._footprint.bounding_box_size()
         max_dim = max(bbox[0], bbox[1])
 
