@@ -79,9 +79,17 @@ class BuildingConfig(PCGConfig):
     floor_color: tuple = (0.7, 0.7, 0.72)
 
     # 屋顶参数
-    roof_style: str = "flat"        # "flat" or "parapet"
+    roof_style: str = "flat"        # "flat", "parapet", "pediment", "stepped", "crown", "barrel"
     parapet_height: float = 1.0     # 女儿墙高度
     roof_color: tuple = (0.5, 0.5, 0.52)
+
+    # 山墙造型参数
+    gable_height: float = 2.5       # 山墙高度(米)
+    gable_width_ratio: float = 0.6  # 山墙宽度占边长比例(0.3~1.0)
+    gable_edges: list = None        # 哪些边有山墙(默认None=自动选择最长的两条对边)
+    gable_color: tuple = None       # 山墙颜色(默认None=与roof_color相同)
+    gable_steps: int = 4            # 阶梯山墙的台阶数(stepped样式)
+    gable_segments: int = 10        # 弧形山墙的分段数(barrel样式)
 
     # 内部布局参数
     enable_interior: bool = True

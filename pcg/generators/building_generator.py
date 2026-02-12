@@ -714,11 +714,21 @@ class BuildingGenerator(GeneratorBase):
         return stats
 
     # =========================================================================
-    # 屋顶（多边形版）
+    # 屋顶（多边形版 + 山墙造型）
     # =========================================================================
 
     def _generate_roof(self, root: str) -> None:
-        """生成屋顶（支持多边形底面）。"""
+        """
+        生成屋顶（支持多边形底面 + 多种山墙造型）。
+
+        支持的 roof_style:
+          - "flat": 平顶（无装饰）
+          - "parapet": 女儿墙（矮墙围合 + 檐口板）
+          - "pediment": 三角山墙（前后面三角形凸起）
+          - "stepped": 阶梯山墙（前后面阶梯状轮廓）
+          - "crown": 冠状山墙（Art Deco风格中央凸起）
+          - "barrel": 弧形山墙（前后面弧形轮廓）
+        """
         roof_root = f"{root}/Roof"
         self.bridge.define_scope(roof_root)
 
@@ -733,78 +743,342 @@ class BuildingGenerator(GeneratorBase):
         else:
             roof_slab_top = num_floors * H
 
-        if self.cfg.roof_style == "parapet":
-            ph = self.cfg.parapet_height
-            parapet_bottom = roof_slab_top
-            parapet_top = roof_slab_top + ph
+        style = self.cfg.roof_style
+        gable_color = self.cfg.gable_color or self.cfg.roof_color
 
-            # 为每条边生成女儿墙段
-            for i in range(self._footprint.num_edges):
-                net_len = self._footprint.wall_edge_net_length(i, wt)
-                if net_len < 0.1:
-                    continue
+        # 山墙造型都基于女儿墙之上，所以先生成女儿墙基底
+        has_parapet = style in ("parapet", "pediment", "stepped", "crown", "barrel")
 
-                start_pt = self._footprint.wall_edge_start_point(i, wt)
-                d = self._footprint.edge_direction(i)
-                n = self._footprint.edge_outward_normal(i)
+        if has_parapet:
+            self._generate_parapet_walls(roof_root, root, roof_slab_top)
 
-                # 女儿墙中心位置
-                mid_x = start_pt[0] + d[0] * net_len / 2
-                mid_z = start_pt[1] + d[1] * net_len / 2
-                parapet_cy = (parapet_bottom + parapet_top) / 2
+        # 生成山墙造型
+        if style in ("pediment", "stepped", "crown", "barrel"):
+            self._generate_gable_decorations(roof_root, root, roof_slab_top, style, gable_color)
 
-                # 计算heading角度
-                heading = self._footprint.edge_heading_deg(i)
+        # 屋顶檐口板（带出挑）
+        if has_parapet:
+            self._generate_roof_cap(roof_root, root, roof_slab_top)
 
-                parapet_path = f"{roof_root}/Parapet_Edge_{i}"
-                xform = self.bridge.define_xform(
-                    parapet_path,
-                    translate=(mid_x, parapet_cy, mid_z),
-                    rotate=(0, heading, 0),
-                )
-                # 在局部坐标系中创建墙段（X沿长度，Z沿厚度）
-                # 局部坐标原点在墙段起点，X沿长度方向，Z沿厚度方向
-                # Xform已经把原点放在了边的中点，所以局部坐标中墙段居中
-                self.bridge.create_box_mesh(
-                    f"{parapet_path}/Geo",
-                    width=net_len, height=ph, depth=wt,
-                    translate=(0, 0, -wt / 2),  # 居中放置，外表面对齐Z=0
-                    display_color=self.cfg.roof_color,
-                )
+    def _generate_parapet_walls(self, roof_root: str, root: str,
+                                 roof_slab_top: float) -> None:
+        """生成女儿墙围合（所有山墙造型的基底）。"""
+        wt = self.cfg.wall_thickness
+        ph = self.cfg.parapet_height
+        parapet_bottom = roof_slab_top
+        parapet_top = roof_slab_top + ph
 
-            # 女儿墙转角柱
-            for i in range(self._footprint.num_vertices):
-                quad = self._footprint.corner_quad(i, wt)
-                col_path = f"{roof_root}/ParapetCorner_{i}"
-                joiner = CornerJoinerGeneric()
-                joiner.generate_usd_with_quad(
-                    self.bridge, col_path,
-                    quad_xz=quad,
-                    y_bottom=parapet_bottom,
-                    y_top=parapet_top,
-                    display_color=self.cfg.roof_color,
-                )
+        # 为每条边生成女儿墙段
+        for i in range(self._footprint.num_edges):
+            net_len = self._footprint.wall_edge_net_length(i, wt)
+            if net_len < 0.1:
+                continue
 
-        # 屋顶板（带出挑）
-        # 注意：楼板循环已经生成了顶层楼板（Slab_F{num_floors}），
-        # 这里只在有parapet时生成额外的出挑檐口板，位于parapet顶部
-        if self.cfg.roof_style == "parapet":
-            overhang = 0.25
-            roof_footprint = self._footprint.inset_polygon(-overhang)
-            roof_verts = roof_footprint.vertices
-            roof_tris = roof_footprint.triangulate()
+            start_pt = self._footprint.wall_edge_start_point(i, wt)
+            d = self._footprint.edge_direction(i)
 
-            # 檐口板在女儿墙顶部
-            cap_y = roof_slab_top + self.cfg.parapet_height + 0.075
-            self.bridge.create_polygon_slab(
-                f"{roof_root}/RoofCap",
-                vertices_xz=roof_verts,
-                triangles=roof_tris,
-                thickness=0.15,
-                y_center=cap_y,
+            mid_x = start_pt[0] + d[0] * net_len / 2
+            mid_z = start_pt[1] + d[1] * net_len / 2
+            parapet_cy = (parapet_bottom + parapet_top) / 2
+
+            heading = self._footprint.edge_heading_deg(i)
+
+            parapet_path = f"{roof_root}/Parapet_Edge_{i}"
+            self.bridge.define_xform(
+                parapet_path,
+                translate=(mid_x, parapet_cy, mid_z),
+                rotate=(0, heading, 0),
+            )
+            self.bridge.create_box_mesh(
+                f"{parapet_path}/Geo",
+                width=net_len, height=ph, depth=wt,
+                translate=(0, 0, -wt / 2),
                 display_color=self.cfg.roof_color,
             )
-            self.bridge.bind_material(f"{roof_root}/RoofCap", f"{root}/Materials/RoofMaterial")
+
+        # 女儿墙转角柱
+        for i in range(self._footprint.num_vertices):
+            quad = self._footprint.corner_quad(i, wt)
+            col_path = f"{roof_root}/ParapetCorner_{i}"
+            joiner = CornerJoinerGeneric()
+            joiner.generate_usd_with_quad(
+                self.bridge, col_path,
+                quad_xz=quad,
+                y_bottom=parapet_bottom,
+                y_top=parapet_top,
+                display_color=self.cfg.roof_color,
+            )
+
+    def _generate_roof_cap(self, roof_root: str, root: str,
+                            roof_slab_top: float) -> None:
+        """生成屋顶檐口板（带出挑）。"""
+        overhang = 0.25
+        roof_footprint = self._footprint.inset_polygon(-overhang)
+        roof_verts = roof_footprint.vertices
+        roof_tris = roof_footprint.triangulate()
+
+        cap_y = roof_slab_top + self.cfg.parapet_height + 0.075
+        self.bridge.create_polygon_slab(
+            f"{roof_root}/RoofCap",
+            vertices_xz=roof_verts,
+            triangles=roof_tris,
+            thickness=0.15,
+            y_center=cap_y,
+            display_color=self.cfg.roof_color,
+        )
+        self.bridge.bind_material(f"{roof_root}/RoofCap", f"{root}/Materials/RoofMaterial")
+
+    def _resolve_gable_edges(self) -> list:
+        """
+        确定哪些边有山墙造型。
+
+        如果用户指定了 gable_edges，直接使用。
+        否则自动选择：对于矩形，选择前后两面（edge 0 和 edge 2）；
+        对于其他多边形，选择最长的两条边。
+        """
+        if self.cfg.gable_edges is not None:
+            return list(self.cfg.gable_edges)
+
+        n = self._footprint.num_edges
+        if self.cfg.footprint_type == "rectangle" and n == 4:
+            # 矩形：前后两面（edge 3 = front, edge 1 = back）
+            return [1, 3]
+
+        # 其他多边形：选择最长的两条边
+        edge_lengths = [(i, self._footprint.edge_length(i)) for i in range(n)]
+        edge_lengths.sort(key=lambda x: x[1], reverse=True)
+        return [edge_lengths[0][0], edge_lengths[1][0]] if len(edge_lengths) >= 2 else [0]
+
+    def _generate_gable_decorations(self, roof_root: str, root: str,
+                                     roof_slab_top: float, style: str,
+                                     gable_color: tuple) -> None:
+        """
+        在指定边上生成山墙造型装饰。
+
+        山墙装饰生成在女儿墙顶部之上，在局部坐标系中：
+          - X轴: 沿边的长度方向
+          - Y轴: 高度方向
+          - Z轴: 墙体厚度方向（外表面对齐Z=0）
+        """
+        wt = self.cfg.wall_thickness
+        ph = self.cfg.parapet_height
+        gable_h = self.cfg.gable_height
+        gable_wr = self.cfg.gable_width_ratio
+        gable_base_y = roof_slab_top + ph  # 山墙底部 = 女儿墙顶部
+
+        gable_edges = self._resolve_gable_edges()
+
+        for edge_idx in gable_edges:
+            if edge_idx >= self._footprint.num_edges:
+                continue
+
+            net_len = self._footprint.wall_edge_net_length(edge_idx, wt)
+            if net_len < 1.0:
+                continue
+
+            start_pt = self._footprint.wall_edge_start_point(edge_idx, wt)
+            d = self._footprint.edge_direction(edge_idx)
+            heading = self._footprint.edge_heading_deg(edge_idx)
+
+            # 边的中点（世界坐标）
+            mid_x = start_pt[0] + d[0] * net_len / 2
+            mid_z = start_pt[1] + d[1] * net_len / 2
+
+            # 创建山墙根节点（Xform变换到边的中点，旋转到边的方向）
+            gable_root = f"{roof_root}/Gable_Edge_{edge_idx}"
+            self.bridge.define_xform(
+                gable_root,
+                translate=(mid_x, gable_base_y, mid_z),
+                rotate=(0, heading, 0),
+            )
+
+            # 在局部坐标系中生成山墙造型
+            if style == "pediment":
+                self._gen_pediment_gable(gable_root, net_len, gable_h, gable_wr, wt, gable_color)
+            elif style == "stepped":
+                self._gen_stepped_gable(gable_root, net_len, gable_h, gable_wr, wt, gable_color)
+            elif style == "crown":
+                self._gen_crown_gable(gable_root, net_len, gable_h, gable_wr, wt, gable_color)
+            elif style == "barrel":
+                self._gen_barrel_gable(gable_root, net_len, gable_h, gable_wr, wt, gable_color)
+
+    # -----------------------------------------------------------------
+    # pediment: 三角山墙
+    # -----------------------------------------------------------------
+    def _gen_pediment_gable(self, parent: str, edge_len: float,
+                            gable_h: float, width_ratio: float,
+                            wt: float, color: tuple) -> None:
+        """
+        生成三角山墙。
+
+        在女儿墙顶部中央生成三角形棱柱：
+          - 底边宽度 = edge_len * width_ratio
+          - 高度 = gable_h
+          - 厚度 = wt
+
+        局部坐标系（原点在边中点，Y=0对应女儿墙顶部）：
+          三角形截面在XY平面，沿Z方向拉伸wt厚度
+        """
+        half_w = edge_len * width_ratio / 2
+
+        # 三角形截面顶点（XZ平面，因为create_prism_mesh用XZ平面截面）
+        # 但我们需要在局部坐标系中生成，山墙是在XY平面的三角形
+        # 使用box_mesh堆叠来近似三角形
+
+        # 策略：用多个递减宽度的box堆叠来近似三角形
+        num_layers = 8
+        layer_h = gable_h / num_layers
+
+        for j in range(num_layers):
+            # 每层的宽度线性递减
+            ratio = 1.0 - (j + 0.5) / num_layers  # 中心点的比例
+            layer_w = half_w * 2 * ratio
+            if layer_w < 0.1:
+                continue
+
+            layer_cy = j * layer_h + layer_h / 2  # 局部Y
+
+            self.bridge.create_box_mesh(
+                f"{parent}/PedLayer_{j}",
+                width=layer_w, height=layer_h, depth=wt,
+                translate=(0, layer_cy, -wt / 2),
+                display_color=color,
+            )
+
+        # 尖顶装饰块
+        cap_size = max(0.3, wt * 1.5)
+        self.bridge.create_box_mesh(
+            f"{parent}/PedCap",
+            width=cap_size, height=cap_size * 0.6, depth=wt * 1.2,
+            translate=(0, gable_h + cap_size * 0.3, -wt * 0.6),
+            display_color=color,
+        )
+
+    # -----------------------------------------------------------------
+    # stepped: 阶梯山墙
+    # -----------------------------------------------------------------
+    def _gen_stepped_gable(self, parent: str, edge_len: float,
+                           gable_h: float, width_ratio: float,
+                           wt: float, color: tuple) -> None:
+        """
+        生成阶梯山墙。
+
+        对称的阶梯状轮廓，中央最高，两侧递减。
+        每级台阶是一个方块，宽度递减，高度递增。
+        """
+        n_steps = max(2, self.cfg.gable_steps)
+        half_w = edge_len * width_ratio / 2
+        step_h = gable_h / n_steps  # 每级台阶的高度增量
+
+        for j in range(n_steps):
+            # 第j级台阶（从外到内，宽度递减，高度递增）
+            step_w = half_w * 2 * (1.0 - j / n_steps)
+            step_total_h = step_h * (j + 1)  # 从底部到该级顶部的总高
+
+            if step_w < 0.2:
+                continue
+
+            # 每级只生成当级的增量部分（避免重叠）
+            block_bottom = step_h * j
+            block_h = step_h
+            block_cy = block_bottom + block_h / 2
+
+            self.bridge.create_box_mesh(
+                f"{parent}/Step_{j}",
+                width=step_w, height=block_h, depth=wt,
+                translate=(0, block_cy, -wt / 2),
+                display_color=color,
+            )
+
+    # -----------------------------------------------------------------
+    # crown: 冠状山墙 (Art Deco)
+    # -----------------------------------------------------------------
+    def _gen_crown_gable(self, parent: str, edge_len: float,
+                         gable_h: float, width_ratio: float,
+                         wt: float, color: tuple) -> None:
+        """
+        生成冠状山墙（Art Deco风格）。
+
+        中央主体 + 两侧对称翼部：
+          - 中央主体：较窄的高块
+          - 两侧翼部：递减高度的矮块
+          - 顶部装饰块
+        """
+        half_w = edge_len * width_ratio / 2
+
+        # 中央主体（占总宽的30%）
+        center_w = half_w * 2 * 0.3
+        self.bridge.create_box_mesh(
+            f"{parent}/CrownCenter",
+            width=center_w, height=gable_h, depth=wt,
+            translate=(0, gable_h / 2, -wt / 2),
+            display_color=color,
+        )
+
+        # 中央顶部装饰块（稍窄稍高）
+        cap_w = center_w * 0.5
+        cap_h = gable_h * 0.25
+        self.bridge.create_box_mesh(
+            f"{parent}/CrownCap",
+            width=cap_w, height=cap_h, depth=wt * 1.1,
+            translate=(0, gable_h + cap_h / 2, -wt * 0.55),
+            display_color=color,
+        )
+
+        # 两侧翼部（对称，各两级）
+        wing_levels = [
+            {"w_ratio": 0.25, "h_ratio": 0.65, "offset_ratio": 0.35},
+            {"w_ratio": 0.15, "h_ratio": 0.40, "offset_ratio": 0.60},
+        ]
+
+        for k, wl in enumerate(wing_levels):
+            wing_w = half_w * 2 * wl["w_ratio"]
+            wing_h = gable_h * wl["h_ratio"]
+            wing_offset_x = half_w * 2 * wl["offset_ratio"]
+
+            for side, sign in [("L", -1), ("R", 1)]:
+                self.bridge.create_box_mesh(
+                    f"{parent}/CrownWing_{side}_{k}",
+                    width=wing_w, height=wing_h, depth=wt,
+                    translate=(sign * wing_offset_x, wing_h / 2, -wt / 2),
+                    display_color=color,
+                )
+
+    # -----------------------------------------------------------------
+    # barrel: 弧形山墙
+    # -----------------------------------------------------------------
+    def _gen_barrel_gable(self, parent: str, edge_len: float,
+                          gable_h: float, width_ratio: float,
+                          wt: float, color: tuple) -> None:
+        """
+        生成弧形山墙。
+
+        用多段方块近似弧形轮廓，每段的高度按正弦/圆弧曲线变化。
+        """
+        n_seg = max(4, self.cfg.gable_segments)
+        half_w = edge_len * width_ratio / 2
+        seg_w = half_w * 2 / n_seg  # 每段的宽度
+
+        for j in range(n_seg):
+            # 每段的中心X位置（相对于山墙中心）
+            seg_cx = -half_w + (j + 0.5) * seg_w
+
+            # 弧形高度：用正弦曲线
+            # t ∈ [0, 1] 表示从左到右的位置
+            t = (j + 0.5) / n_seg
+            # 正弦曲线: sin(pi * t)，在t=0.5时最高
+            seg_h = gable_h * math.sin(math.pi * t)
+            if seg_h < 0.05:
+                continue
+
+            self.bridge.create_box_mesh(
+                f"{parent}/BarrelSeg_{j}",
+                width=seg_w * 1.02,  # 略宽一点避免缝隙
+                height=seg_h,
+                depth=wt,
+                translate=(seg_cx, seg_h / 2, -wt / 2),
+                display_color=color,
+            )
 
     # =========================================================================
     # 光照
