@@ -4,7 +4,14 @@ Wall Segments: 具体墙段模块实现。
 所有墙段在局部坐标系中生成几何体：
   - X: [0, length]  沿墙段长度
   - Y: [0, height]  沿墙段高度
-  - Z: [0, -thickness]  厚度向内（外表面Z=0，内表面Z=-thickness）
+  - Z: [0, +thickness]  厚度向内（外表面Z=0，内表面Z=+thickness）
+
+旋转后的世界坐标映射：
+  - 局部+X → 边方向 (edge direction)
+  - 局部+Z → 建筑内侧 (inward normal)
+  - 局部-Z → 建筑外侧 (outward normal)
+
+因此外表面(Z=0)对齐建筑外轮廓线，内表面(Z=+T)朝向建筑内部。
 
 每种墙段类型通过 @IWallSegment.register("TypeName") 装饰器注册，
 可通过 IWallSegment.create("TypeName", ...) 工厂方法实例化。
@@ -41,29 +48,29 @@ class SolidWallSegment(IWallSegment):
         mesh = UsdGeom.Mesh.Define(bridge.stage, path)
         L, H, T = self.length, self.height, self.thickness
 
-        # 8个顶点，外表面Z=0，内表面Z=-T
+        # 8个顶点，外表面Z=0，内表面Z=+T
         points = Vt.Vec3fArray([
-            Gf.Vec3f(0, 0, 0),     Gf.Vec3f(L, 0, 0),      # 外底左, 外底右
-            Gf.Vec3f(L, H, 0),     Gf.Vec3f(0, H, 0),      # 外顶右, 外顶左
-            Gf.Vec3f(0, 0, -T),    Gf.Vec3f(L, 0, -T),     # 内底左, 内底右
-            Gf.Vec3f(L, H, -T),    Gf.Vec3f(0, H, -T),     # 内顶右, 内顶左
+            Gf.Vec3f(0, 0, 0),     Gf.Vec3f(L, 0, 0),      # 0:外底左, 1:外底右
+            Gf.Vec3f(L, H, 0),     Gf.Vec3f(0, H, 0),      # 2:外顶右, 3:外顶左
+            Gf.Vec3f(0, 0, T),     Gf.Vec3f(L, 0, T),      # 4:内底左, 5:内底右
+            Gf.Vec3f(L, H, T),     Gf.Vec3f(0, H, T),      # 6:内顶右, 7:内顶左
         ])
 
         fvc = Vt.IntArray([4, 4, 4, 4, 4, 4])
         fvi = Vt.IntArray([
-            0, 1, 2, 3,   # 外面 (+Z) 法线朝外
-            4, 7, 6, 5,   # 内面 (-Z) 法线朝内
-            0, 3, 7, 4,   # 左端面 (-X)
-            1, 5, 6, 2,   # 右端面 (+X)
-            3, 2, 6, 7,   # 顶面 (+Y)
-            0, 4, 5, 1,   # 底面 (-Y)
+            0, 3, 2, 1,   # 外面 (Z=0) 法线朝-Z（朝外）
+            4, 5, 6, 7,   # 内面 (Z=+T) 法线朝+Z（朝内）
+            0, 4, 7, 3,   # 左端面 (-X) 法线朝-X
+            1, 2, 6, 5,   # 右端面 (+X) 法线朝+X
+            3, 7, 6, 2,   # 顶面 (+Y) 法线朝+Y
+            0, 1, 5, 4,   # 底面 (-Y) 法线朝-Y
         ])
 
         mesh.GetPointsAttr().Set(points)
         mesh.GetFaceVertexCountsAttr().Set(fvc)
         mesh.GetFaceVertexIndicesAttr().Set(fvi)
         mesh.GetSubdivisionSchemeAttr().Set("none")
-        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, -T), Gf.Vec3f(L, H, 0)]))
+        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(L, H, T)]))
 
         color = self.extra_params.get("color", (0.85, 0.82, 0.78))
         mesh.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*color)]))
@@ -139,8 +146,8 @@ class WindowWallSegment(IWallSegment):
         all_fvc = []
         all_fvi = []
 
-        # --- 外表面 (Z=0) 和 内表面 (Z=-T) ---
-        for z_val, is_outer in [(0.0, True), (-T, False)]:
+        # --- 外表面 (Z=0) 和 内表面 (Z=+T) ---
+        for z_val, is_outer in [(0.0, True), (T, False)]:
             base = len(all_points)
             pts, fvc, fvi = self._gen_face_with_holes(L, H, holes, z_val, is_outer, base)
             all_points.extend(pts)
@@ -158,13 +165,13 @@ class WindowWallSegment(IWallSegment):
         mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray(all_fvc))
         mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(all_fvi))
         mesh.GetSubdivisionSchemeAttr().Set("none")
-        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, -T), Gf.Vec3f(L, H, 0)]))
+        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(L, H, T)]))
 
         color = self.extra_params.get("color", (0.85, 0.82, 0.78))
         mesh.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*color)]))
 
-        # 返回窗户位置（局部坐标，Z=-T/2 即墙体中心）
-        win_positions = [(h["cx"], h["cy"], -T / 2) for h in holes]
+        # 返回窗户位置（局部坐标，Z=+T/2 即墙体中心）
+        win_positions = [(h["cx"], h["cy"], T / 2) for h in holes]
         return WallSegmentResult(
             window_positions=win_positions,
             stats={"type": "WindowWall", "length": self.length, "num_windows": len(holes)}
@@ -196,24 +203,25 @@ class WindowWallSegment(IWallSegment):
                     ])
                     fvc.append(4)
                     if is_outer:
-                        fvi.extend([idx, idx+1, idx+2, idx+3])
-                    else:
+                        # 外面(Z=0): 法线朝-Z（朝外），winding CW from +Z
                         fvi.extend([idx, idx+3, idx+2, idx+1])
+                    else:
+                        # 内面(Z=+T): 法线朝+Z（朝内），winding CCW from +Z
+                        fvi.extend([idx, idx+1, idx+2, idx+3])
 
         return points, fvc, fvi
 
     def _add_border_faces(self, pts, fvc, fvi, L, H, T):
         """添加墙段的顶面、底面、左端面、右端面。"""
         borders = [
-            # (4 corners, winding for outward normal)
-            # 顶面 (Y=H)
-            ([(0,H,0), (L,H,0), (L,H,-T), (0,H,-T)], [0,1,2,3]),
-            # 底面 (Y=0)
-            ([(0,0,0), (L,0,0), (L,0,-T), (0,0,-T)], [0,3,2,1]),
-            # 左端面 (X=0)
-            ([(0,0,0), (0,H,0), (0,H,-T), (0,0,-T)], [0,3,2,1]),
-            # 右端面 (X=L)
-            ([(L,0,0), (L,H,0), (L,H,-T), (L,0,-T)], [0,1,2,3]),
+            # 顶面 (Y=H): 法线朝+Y
+            ([(0,H,0), (L,H,0), (L,H,T), (0,H,T)], [0,1,2,3]),
+            # 底面 (Y=0): 法线朝-Y
+            ([(0,0,0), (L,0,0), (L,0,T), (0,0,T)], [0,3,2,1]),
+            # 左端面 (X=0): 法线朝-X
+            ([(0,0,0), (0,H,0), (0,H,T), (0,0,T)], [0,3,2,1]),
+            # 右端面 (X=L): 法线朝+X
+            ([(L,0,0), (L,H,0), (L,H,T), (L,0,T)], [0,1,2,3]),
         ]
         for corners, winding in borders:
             idx = len(pts)
@@ -231,13 +239,13 @@ class WindowWallSegment(IWallSegment):
 
         inner_faces = [
             # 底边内壁 (Y=y0平面, 法线朝-Y)
-            ([(x0,y0,0), (x1,y0,0), (x1,y0,-T), (x0,y0,-T)], [0,1,2,3]),
+            ([(x0,y0,0), (x1,y0,0), (x1,y0,T), (x0,y0,T)], [0,3,2,1]),
             # 顶边内壁 (Y=y1平面, 法线朝+Y)
-            ([(x0,y1,0), (x1,y1,0), (x1,y1,-T), (x0,y1,-T)], [0,3,2,1]),
+            ([(x0,y1,0), (x1,y1,0), (x1,y1,T), (x0,y1,T)], [0,1,2,3]),
             # 左边内壁 (X=x0平面, 法线朝-X)
-            ([(x0,y0,0), (x0,y1,0), (x0,y1,-T), (x0,y0,-T)], [0,1,2,3]),
+            ([(x0,y0,0), (x0,y1,0), (x0,y1,T), (x0,y0,T)], [0,3,2,1]),
             # 右边内壁 (X=x1平面, 法线朝+X)
-            ([(x1,y0,0), (x1,y1,0), (x1,y1,-T), (x1,y0,-T)], [0,3,2,1]),
+            ([(x1,y0,0), (x1,y1,0), (x1,y1,T), (x1,y0,T)], [0,1,2,3]),
         ]
         for corners, winding in inner_faces:
             idx = len(pts)
@@ -277,7 +285,7 @@ class DoorWallSegment(IWallSegment):
         # 门洞作为一个从底部开始的孔洞
         hole = {
             "cx": L / 2,
-            "cy": dh / 2,  # 门洞中心Y = dh/2 (底部从Y=0开始)
+            "cy": dh / 2,
             "w": dw,
             "h": dh,
         }
@@ -288,7 +296,7 @@ class DoorWallSegment(IWallSegment):
         all_fvi = []
 
         # 外表面和内表面
-        for z_val, is_outer in [(0.0, True), (-T, False)]:
+        for z_val, is_outer in [(0.0, True), (T, False)]:
             base = len(all_points)
             pts, fvc, fvi = WindowWallSegment._gen_face_with_holes(
                 self, L, H, holes, z_val, is_outer, base)
@@ -300,16 +308,16 @@ class DoorWallSegment(IWallSegment):
         WindowWallSegment._add_border_faces(self, all_points, all_fvc, all_fvi, L, H, T)
 
         # 门洞内壁（只有顶边和两个侧边，底边是地面所以不需要）
-        cx, dw2, dh2 = L/2, dw/2, dh
-        x0, x1 = cx - dw2, cx + dw2
+        cx_door, dw2, dh2 = L/2, dw/2, dh
+        x0, x1 = cx_door - dw2, cx_door + dw2
 
         inner_faces = [
-            # 顶边内壁 (Y=dh)
-            ([(x0,dh,0), (x1,dh,0), (x1,dh,-T), (x0,dh,-T)], [0,3,2,1]),
-            # 左边内壁 (X=x0)
-            ([(x0,0,0), (x0,dh,0), (x0,dh,-T), (x0,0,-T)], [0,1,2,3]),
-            # 右边内壁 (X=x1)
-            ([(x1,0,0), (x1,dh,0), (x1,dh,-T), (x1,0,-T)], [0,3,2,1]),
+            # 顶边内壁 (Y=dh): 法线朝+Y
+            ([(x0,dh,0), (x1,dh,0), (x1,dh,T), (x0,dh,T)], [0,1,2,3]),
+            # 左边内壁 (X=x0): 法线朝-X
+            ([(x0,0,0), (x0,dh,0), (x0,dh,T), (x0,0,T)], [0,3,2,1]),
+            # 右边内壁 (X=x1): 法线朝+X
+            ([(x1,0,0), (x1,dh,0), (x1,dh,T), (x1,0,T)], [0,1,2,3]),
         ]
         for corners, winding in inner_faces:
             idx = len(all_points)
@@ -322,13 +330,13 @@ class DoorWallSegment(IWallSegment):
         mesh.GetFaceVertexCountsAttr().Set(Vt.IntArray(all_fvc))
         mesh.GetFaceVertexIndicesAttr().Set(Vt.IntArray(all_fvi))
         mesh.GetSubdivisionSchemeAttr().Set("none")
-        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, -T), Gf.Vec3f(L, H, 0)]))
+        mesh.GetExtentAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0, 0, 0), Gf.Vec3f(L, H, T)]))
 
         color = self.extra_params.get("color", (0.85, 0.82, 0.78))
         mesh.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(*color)]))
 
         return WallSegmentResult(
-            door_positions=[(L/2, dh/2, -T/2)],
+            door_positions=[(L/2, dh/2, T/2)],
             stats={"type": "DoorWall", "length": self.length, "num_doors": 1}
         )
 
@@ -361,7 +369,6 @@ class CurtainWallSegment(IWallSegment):
         super().__init__(length, height, thickness, name, **kwargs)
         self.mullion_width = mullion_width
         self.transom_height = transom_height
-        # 自动计算网格数（如果未指定）
         self.grid_cols = grid_cols if grid_cols > 0 else max(1, int(length / 1.5))
         self.grid_rows = grid_rows if grid_rows > 0 else max(1, int(height / 1.2))
         self.glass_color = glass_color
@@ -372,7 +379,7 @@ class CurtainWallSegment(IWallSegment):
         L, H, T = self.length, self.height, self.thickness
 
         # 玻璃面板（整块，略微内缩）
-        glass_z = -T * 0.3  # 玻璃在墙体厚度的30%处
+        glass_z = T * 0.3  # 玻璃在墙体厚度的30%处（向内）
         glass_t = 0.012     # 玻璃厚度12mm
 
         bridge.create_box_mesh(
@@ -383,7 +390,7 @@ class CurtainWallSegment(IWallSegment):
         )
 
         # 金属框架
-        frame_z = -T * 0.15  # 框架在玻璃前面
+        frame_z = T * 0.15  # 框架在玻璃前面（更靠近外表面）
         mw = self.mullion_width
         th = self.transom_height
 
@@ -464,7 +471,7 @@ class LouverWallSegment(IWallSegment):
             bridge.create_box_mesh(
                 f"{path}/TopSolid",
                 width=L, height=top_h, depth=T,
-                translate=(L/2, self.louver_end + top_h/2, -T/2),
+                translate=(L/2, self.louver_end + top_h/2, T/2),
                 display_color=color
             )
 
@@ -473,7 +480,7 @@ class LouverWallSegment(IWallSegment):
             bridge.create_box_mesh(
                 f"{path}/BottomSolid",
                 width=L, height=self.louver_start, depth=T,
-                translate=(L/2, self.louver_start/2, -T/2),
+                translate=(L/2, self.louver_start/2, T/2),
                 display_color=color
             )
 
@@ -490,7 +497,7 @@ class LouverWallSegment(IWallSegment):
             bridge.create_box_mesh(
                 f"{path}/Blade_{i}",
                 width=L - 0.02, height=blade_width, depth=blade_thickness,
-                translate=(L/2, y, -T/2),
+                translate=(L/2, y, T/2),
                 display_color=louver_color
             )
             # 旋转百叶片
@@ -503,7 +510,7 @@ class LouverWallSegment(IWallSegment):
             bridge.create_box_mesh(
                 f"{path}/Frame_{side}",
                 width=frame_w, height=louver_zone_h, depth=T,
-                translate=(x, self.louver_start + louver_zone_h/2, -T/2),
+                translate=(x, self.louver_start + louver_zone_h/2, T/2),
                 display_color=(0.3, 0.3, 0.32)
             )
 
@@ -548,7 +555,7 @@ class MixedWallSegment(IWallSegment):
         bridge.create_box_mesh(
             f"{path}/LowerSolid",
             width=L, height=sh, depth=T,
-            translate=(L/2, sh/2, -T/2),
+            translate=(L/2, sh/2, T/2),
             display_color=color
         )
 
@@ -559,7 +566,7 @@ class MixedWallSegment(IWallSegment):
             name=f"{self.name}_upper",
             window_width=self.window_width,
             window_height=self.window_height,
-            window_sill_height=0.3,  # 上部区域的窗台高度
+            window_sill_height=0.3,
             window_spacing=self.window_spacing,
             color=color,
         )
