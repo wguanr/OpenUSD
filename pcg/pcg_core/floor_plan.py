@@ -220,14 +220,45 @@ class UnitPlan:
         """
         沿X轴镜像户型（用于板楼左右对称布局）。
 
+        镜像时同时翻转东西朝向，使镜像后的户型立面元素正确。
+
         Args:
             axis_x: 镜像轴的X坐标
         """
         mirrored = copy.deepcopy(self)
         for room in mirrored.rooms:
-            # 镜像: new_x = 2*axis_x - (x + width) = 2*axis_x - x_end
+            # 镜像X坐标: new_x = 2*axis_x - (x + width)
             new_x = 2 * axis_x - room.x_end
             room.x = new_x
+            # 翻转东西朝向
+            if room.facing == Facing.EAST:
+                room.facing = Facing.WEST
+            elif room.facing == Facing.WEST:
+                room.facing = Facing.EAST
+        mirrored.compute_bounds()
+        return mirrored
+
+    def mirror_z(self, axis_z: float = 0.0) -> "UnitPlan":
+        """
+        沿Z轴镜像户型（用于塔楼南北对称布局）。
+
+        镜像时同时翻转南北朝向。
+
+        Args:
+            axis_z: 镜像轴的Z坐标
+        """
+        mirrored = copy.deepcopy(self)
+        for room in mirrored.rooms:
+            # 镜像Z坐标: new_z = 2*axis_z - (z + depth)
+            new_z = 2 * axis_z - room.z_end
+            room.z = new_z
+            # 翻转南北朝向
+            if room.facing == Facing.SOUTH:
+                room.facing = Facing.NORTH
+            elif room.facing == Facing.NORTH:
+                room.facing = Facing.SOUTH
+            # 翻转阳台（南变北后不再有阳台，北变南后可能有）
+            # 保持has_balcony不变，由立面生成器根据朝向决定
         mirrored.compute_bounds()
         return mirrored
 
@@ -646,7 +677,39 @@ class FloorPlanFactory:
     标准层平面工厂。
 
     根据建筑类型和户型配置，自动拼合标准层平面。
+    支持1~2种户型，通过镜像实现围绕核心筒的轴对称或中心对称排布。
+
+    板楼对称规则：
+      - 用户指定1~2种户型，工厂自动展开为左右对称布局
+      - ["3BR"] → 左3BR镜像 | 核心筒 | 右3BR （完美轴对称）
+      - ["3BR","2BR"] → 左3BR镜像 | 核心筒 | 右2BR镜像
+        （两种户型各自关于核心筒中轴对称排布）
+
+    塔楼对称规则：
+      - 核心筒居中，户型围绕四面分布
+      - ["3BR"] → 南北各放一对3BR镜像（中心对称）
+      - ["3BR","2BR"] → 南面2×3BR + 北面2×2BR（中心对称）
     """
+
+    @staticmethod
+    def _expand_unit_types(unit_types: List[str], n_units: int) -> List[str]:
+        """
+        将1~2种户型展开为n_units个户型的列表。
+
+        规则：
+        - 1种户型 → 全部相同
+        - 2种户型 → 交替分配
+        """
+        if len(unit_types) == 0:
+            return ["3BR"] * n_units
+        elif len(unit_types) == 1:
+            return unit_types * n_units
+        else:
+            # 2种户型：交替分配
+            result = []
+            for i in range(n_units):
+                result.append(unit_types[i % len(unit_types)])
+            return result
 
     @staticmethod
     def create_slab_floor(
@@ -654,33 +717,48 @@ class FloorPlanFactory:
         core_width: float = 4.0,
         core_depth: float = 0.0,
         num_elevators: int = 1,
+        units_per_floor: int = 2,
     ) -> FloorPlan:
         """
-        创建板楼标准层平面。
+        创建板楼标准层平面（轴对称布局）。
 
-        板楼布局规则：
-        - 核心筒在中央
-        - 左侧户型镜像放置（入户门朝核心筒）
-        - 右侧户型正常放置
+        板楼一梯N户布局规则：
+        - 核心筒在中央，左右各放 N/2 户
+        - 左侧户型 = 右侧户型的X轴镜像（关于核心筒中轴对称）
+        - 同种户型镜像后完美对称，异种户型各自对称排布
+
+        对于一梯两户（最常见）：
+          左户型(镜像) | 核心筒 | 右户型
+          两户关于核心筒中轴线对称
 
         Args:
-            unit_types: 户型类型列表，如 ["3BR", "2BR"]
+            unit_types: 1~2种户型类型，如 ["3BR"] 或 ["3BR", "2BR"]
             core_width: 核心筒面宽
             core_depth: 核心筒进深（0=自动取最大户型进深）
             num_elevators: 电梯数量
+            units_per_floor: 每层户数（默认2）
         """
-        n = len(unit_types)
-        plans = [UnitPlanPresets.create(ut) for ut in unit_types]
+        # 展开户型列表
+        n = units_per_floor
+        expanded = FloorPlanFactory._expand_unit_types(unit_types, n)
+
+        # 创建所有户型平面
+        plans = [UnitPlanPresets.create(ut) for ut in expanded]
 
         # 核心筒进深：取所有户型的最大进深
         max_depth = max(p.total_depth for p in plans)
         if core_depth <= 0:
             core_depth = max_depth
 
-        # 分左右两组
-        left_count = n // 2
-        left_plans = plans[:left_count]
-        right_plans = plans[left_count:]
+        # 分左右两组：左侧取前半，右侧取后半
+        right_count = n // 2
+        left_count = n - right_count
+        # 右侧户型（原始方向）
+        right_plans = plans[:right_count]
+        # 左侧户型 = 右侧户型的镜像（实现对称）
+        # 如果只有1种户型，左右完全对称
+        # 如果有2种户型，左右各自对称
+        left_plans = plans[right_count:]
 
         # 计算总面宽
         left_width = sum(p.total_width for p in left_plans)
@@ -693,12 +771,12 @@ class FloorPlanFactory:
         placed_units = []
         idx = 0
 
-        # 放置左侧户型（镜像）
+        # 放置左侧户型（X轴镜像，使入户门朝核心筒）
         x_cursor = -half_w
         for plan in left_plans:
-            # 镜像户型：使户型的"核心筒侧"朝右
+            # 镜像户型：关于户型自身中心线镜像
             mirrored = plan.mirror_x(axis_x=plan.total_width / 2)
-            # Z方向居中对齐
+            # Z方向居中对齐（与最大进深对齐）
             dz = (max_depth - plan.total_depth) / 2
             placed = PlacedUnit(
                 plan=mirrored,
@@ -711,7 +789,7 @@ class FloorPlanFactory:
             x_cursor += plan.total_width
             idx += 1
 
-        # 核心筒
+        # 核心筒（居中）
         core_z = (max_depth - core_depth) / 2
         core = CorePlan(
             width=core_width,
@@ -722,7 +800,7 @@ class FloorPlanFactory:
         )
         x_cursor += core_width
 
-        # 放置右侧户型
+        # 放置右侧户型（原始方向）
         for plan in right_plans:
             dz = (max_depth - plan.total_depth) / 2
             placed = PlacedUnit(
@@ -749,19 +827,192 @@ class FloorPlanFactory:
         core_width: float = 6.0,
         core_depth: float = 6.0,
         num_elevators: int = 2,
+        units_per_floor: int = 4,
     ) -> FloorPlan:
         """
-        创建塔楼标准层平面。
+        创建塔楼标准层平面（中心对称布局）。
 
-        塔楼布局：核心筒在中央，户型围绕四面分布。
-        简化为：左右各放一半户型，类似宽体板楼。
+        塔楼布局：核心筒居中，户型围绕南北两面分布，形成近正方形平面。
+
+        布局结构（俯视图）：
+          南(+Z)
+          ┌──────────────────────┐
+          │ 南左(镜像) │ 南右    │  ← 南面户型
+          ├────────┬───┴────────┤
+          │        │ 核心筒     │
+          ├────────┴───┬────────┤
+          │ 北左(镜像) │ 北右    │  ← 北面户型（Z轴镜像）
+          └──────────────────────┘
+          北(-Z)
+
+        对称性：
+        - 南面左右户型关于核心筒X轴对称
+        - 北面户型 = 南面户型的Z轴镜像（中心对称）
+        - 整体形成围绕核心筒的中心对称布局
+
+        Args:
+            unit_types: 1~2种户型类型
+            core_width: 核心筒面宽
+            core_depth: 核心筒进深
+            num_elevators: 电梯数量
+            units_per_floor: 每层户数（默认4）
         """
-        return FloorPlanFactory.create_slab_floor(
-            unit_types=unit_types,
-            core_width=core_width,
-            core_depth=core_depth,
+        n = units_per_floor
+        if n < 4:
+            n = 4  # 塔楼最少4户
+
+        # 展开户型：南面和北面各放一半
+        south_count = n // 2
+        north_count = n - south_count
+
+        # 南面户型
+        if len(unit_types) == 1:
+            south_types = [unit_types[0]] * south_count
+            north_types = [unit_types[0]] * north_count
+        elif len(unit_types) >= 2:
+            # 第一种户型放南面，第二种放北面
+            south_types = [unit_types[0]] * south_count
+            north_types = [unit_types[1]] * north_count
+        else:
+            south_types = ["3BR"] * south_count
+            north_types = ["3BR"] * north_count
+
+        south_plans = [UnitPlanPresets.create(ut) for ut in south_types]
+        north_plans = [UnitPlanPresets.create(ut) for ut in north_types]
+
+        # 计算尺寸
+        south_max_depth = max(p.total_depth for p in south_plans)
+        north_max_depth = max(p.total_depth for p in north_plans)
+
+        # 南面户型面宽
+        south_right_count = south_count // 2
+        south_left_count = south_count - south_right_count
+        south_right_plans = south_plans[:south_right_count]
+        south_left_plans = south_plans[south_right_count:]
+        south_width = sum(p.total_width for p in south_left_plans) + \
+                      core_width + \
+                      sum(p.total_width for p in south_right_plans)
+
+        # 北面户型面宽
+        north_right_count = north_count // 2
+        north_left_count = north_count - north_right_count
+        north_right_plans = north_plans[:north_right_count]
+        north_left_plans = north_plans[north_right_count:]
+        north_width = sum(p.total_width for p in north_left_plans) + \
+                      core_width + \
+                      sum(p.total_width for p in north_right_plans)
+
+        # 总面宽取最大值
+        max_width = max(south_width, north_width)
+        total_depth = south_max_depth + core_depth + north_max_depth
+
+        # 居中
+        half_w = max_width / 2
+
+        placed_units = []
+        idx = 0
+
+        # === 南面户型（+Z侧，正常朝向）===
+        south_z_base = core_depth + north_max_depth  # 南面户型的Z起点
+        south_total_w = sum(p.total_width for p in south_left_plans) + \
+                        core_width + \
+                        sum(p.total_width for p in south_right_plans)
+        south_half = south_total_w / 2
+
+        # 南面左侧（镜像）
+        x_cursor = -south_half
+        for plan in south_left_plans:
+            mirrored = plan.mirror_x(axis_x=plan.total_width / 2)
+            dz_offset = south_z_base + (south_max_depth - plan.total_depth) / 2
+            placed = PlacedUnit(
+                plan=mirrored,
+                offset_x=x_cursor,
+                offset_z=dz_offset,
+                mirrored=True,
+                index=idx,
+            )
+            placed_units.append(placed)
+            x_cursor += plan.total_width
+            idx += 1
+
+        # 跳过核心筒宽度
+        x_cursor += core_width
+
+        # 南面右侧
+        for plan in south_right_plans:
+            dz_offset = south_z_base + (south_max_depth - plan.total_depth) / 2
+            placed = PlacedUnit(
+                plan=plan,
+                offset_x=x_cursor,
+                offset_z=dz_offset,
+                mirrored=False,
+                index=idx,
+            )
+            placed_units.append(placed)
+            x_cursor += plan.total_width
+            idx += 1
+
+        # === 北面户型（-Z侧，Z轴镜像）===
+        # 北面户型需要Z轴镜像：南北朝向翻转
+        north_total_w = sum(p.total_width for p in north_left_plans) + \
+                        core_width + \
+                        sum(p.total_width for p in north_right_plans)
+        north_half = north_total_w / 2
+
+        # 北面左侧（X镜像 + Z镜像）
+        x_cursor = -north_half
+        for plan in north_left_plans:
+            # 先Z轴镜像（翻转南北朝向）
+            z_mirrored = plan.mirror_z(axis_z=plan.total_depth / 2)
+            # 再X轴镜像（左右对称）
+            xz_mirrored = z_mirrored.mirror_x(axis_x=z_mirrored.total_width / 2)
+            dz_offset = (north_max_depth - plan.total_depth) / 2
+            placed = PlacedUnit(
+                plan=xz_mirrored,
+                offset_x=x_cursor,
+                offset_z=dz_offset,
+                mirrored=True,
+                index=idx,
+            )
+            placed_units.append(placed)
+            x_cursor += plan.total_width
+            idx += 1
+
+        # 跳过核心筒宽度
+        x_cursor += core_width
+
+        # 北面右侧（仅Z镜像）
+        for plan in north_right_plans:
+            z_mirrored = plan.mirror_z(axis_z=plan.total_depth / 2)
+            dz_offset = (north_max_depth - plan.total_depth) / 2
+            placed = PlacedUnit(
+                plan=z_mirrored,
+                offset_x=x_cursor,
+                offset_z=dz_offset,
+                mirrored=False,
+                index=idx,
+            )
+            placed_units.append(placed)
+            x_cursor += plan.total_width
+            idx += 1
+
+        # 核心筒（居中）
+        core_x = -core_width / 2
+        core_z = north_max_depth
+        core = CorePlan(
+            width=core_width,
+            depth=core_depth,
+            x=core_x,
+            z=core_z,
             num_elevators=num_elevators,
         )
+
+        floor_plan = FloorPlan(
+            placed_units=placed_units,
+            core=core,
+            building_type="tower",
+        )
+        return floor_plan
 
 
 # =============================================================================
@@ -826,6 +1077,9 @@ def _union_rects_shapely(rects: List[Tuple[float, float, float, float]]) -> List
     """
     使用 shapely 合并多个矩形为一个外轮廓多边形。
 
+    如果合并结果是 MultiPolygon（多个不连通区域），
+    会用微小连接矩形桥接各部分，确保输出单一多边形。
+
     Args:
         rects: [(x_min, z_min, x_max, z_max), ...]
     Returns:
@@ -844,12 +1098,59 @@ def _union_rects_shapely(rects: List[Tuple[float, float, float, float]]) -> List
 
     merged = unary_union(polygons)
 
-    # 取外轮廓
+    # 处理 MultiPolygon：用微小连接矩形桥接各部分
     if isinstance(merged, MultiPolygon):
-        # 取面积最大的多边形
-        merged = max(merged.geoms, key=lambda g: g.area)
+        geoms = list(merged.geoms)
+        # 尝试用微小缓冲区合并（边缘接触的多边形）
+        buffered = merged.buffer(0.01).buffer(-0.01)
+        if isinstance(buffered, MultiPolygon):
+            # 仍然不连通，用 convex hull 包裹所有部分
+            # 但这会丢失凹形细节，所以我们用连接桥的方式
+            # 找到所有部分的包围盒，用包围盒中心线作为桥接矩形
+            all_parts = list(buffered.geoms)
+            # 按质心X坐标排序
+            all_parts.sort(key=lambda g: g.centroid.x)
+            bridge_polys = []
+            for i in range(len(all_parts) - 1):
+                b1 = all_parts[i].bounds   # (minx, miny, maxx, maxy)
+                b2 = all_parts[i + 1].bounds
+                # 创建连接桥：从第i个的右边到第i+1个的左边
+                bridge_x_min = b1[2] - 0.1  # 小量重叠确保连通
+                bridge_x_max = b2[0] + 0.1
+                # Z范围取两个部分的重叠区域
+                z_overlap_min = max(b1[1], b2[1])
+                z_overlap_max = min(b1[3], b2[3])
+                if z_overlap_max > z_overlap_min:
+                    # 有Z重叠，用重叠区域中心作为桥
+                    bridge_z_mid = (z_overlap_min + z_overlap_max) / 2
+                    bridge_z_half = max(0.5, (z_overlap_max - z_overlap_min) / 4)
+                else:
+                    # 无Z重叠，用两个部分的Z中心
+                    bridge_z_mid = (b1[1] + b1[3] + b2[1] + b2[3]) / 4
+                    bridge_z_half = 0.5
+                bridge = ShapelyPolygon([
+                    (bridge_x_min, bridge_z_mid - bridge_z_half),
+                    (bridge_x_max, bridge_z_mid - bridge_z_half),
+                    (bridge_x_max, bridge_z_mid + bridge_z_half),
+                    (bridge_x_min, bridge_z_mid + bridge_z_half),
+                ])
+                bridge_polys.append(bridge)
+            # 重新合并
+            all_geoms = list(buffered.geoms) + bridge_polys
+            merged = unary_union(all_geoms)
+            if isinstance(merged, MultiPolygon):
+                # 最后手段：取最大的
+                merged = max(merged.geoms, key=lambda g: g.area)
+        else:
+            merged = buffered
 
-    coords = list(merged.exterior.coords)
+    # 简化轮廓：去除buffer操作引入的微小弧线段
+    # tolerance=0.05m 足以去除微小抖动，保留建筑级别的轮廓细节
+    simplified = merged.simplify(0.05, preserve_topology=True)
+    if simplified.is_empty or simplified.area < 1e-6:
+        simplified = merged
+
+    coords = list(simplified.exterior.coords)
     # shapely 返回的是闭合多边形（首尾相同），去掉最后一个重复点
     if len(coords) > 1 and coords[0] == coords[-1]:
         coords = coords[:-1]

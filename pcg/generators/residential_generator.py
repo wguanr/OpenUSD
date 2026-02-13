@@ -256,22 +256,19 @@ class ResidentialGenerator(GeneratorBase):
     # =========================================================================
 
     def _create_floor_plan(self):
-        """根据配置创建标准层平面。"""
-        # 解析户型类型
-        n_units = self.cfg.units_per_floor
+        """
+        根据配置创建标准层平面。
+
+        用户只需指定1~2种户型类型，FloorPlanFactory会自动展开为
+        对称布局（板楼轴对称，塔楼中心对称）。
+        """
+        # 解析户型类型（1~2种即可，工厂会自动展开）
         if self.cfg.unit_types:
-            unit_types = self.cfg.unit_types[:n_units]
-            while len(unit_types) < n_units:
-                unit_types.append(unit_types[-1])
+            unit_types = list(self.cfg.unit_types[:2])  # 最多取2种
         else:
-            if n_units <= 2:
-                unit_types = ["3BR"] * n_units
-            elif n_units <= 4:
-                unit_types = ["3BR", "2BR"] * (n_units // 2)
-                if n_units % 2:
-                    unit_types.append("2BR")
-            else:
-                unit_types = ["2BR"] * n_units
+            unit_types = ["3BR"]  # 默认3BR
+
+        n_units = self.cfg.units_per_floor
 
         # 创建标准层平面
         if self.cfg.building_type == "tower":
@@ -280,6 +277,7 @@ class ResidentialGenerator(GeneratorBase):
                 core_width=self.cfg.core_width,
                 core_depth=self.cfg.core_depth,
                 num_elevators=self.cfg.num_elevators,
+                units_per_floor=n_units,
             )
         else:
             self._floor_plan = FloorPlanFactory.create_slab_floor(
@@ -287,6 +285,7 @@ class ResidentialGenerator(GeneratorBase):
                 core_width=self.cfg.core_width,
                 core_depth=self.cfg.core_depth,
                 num_elevators=self.cfg.num_elevators,
+                units_per_floor=n_units,
             )
 
         # 计算轮廓和三角化
