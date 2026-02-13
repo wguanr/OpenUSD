@@ -28,6 +28,17 @@ try:
 except ImportError:
     HAS_SHAPELY = False
 
+# 延迟导入，避免循环依赖
+_unit_plan_generator = None
+
+def _get_unit_plan_generator():
+    """延迟导入 UnitPlanGenerator，避免循环依赖。"""
+    global _unit_plan_generator
+    if _unit_plan_generator is None:
+        from pcg_core.unit_plan_generator import UnitPlanGenerator
+        _unit_plan_generator = UnitPlanGenerator
+    return _unit_plan_generator
+
 
 # =============================================================================
 # 枚举类型
@@ -718,6 +729,7 @@ class FloorPlanFactory:
         core_depth: float = 0.0,
         num_elevators: int = 1,
         units_per_floor: int = 2,
+        seed: int = 0,
     ) -> FloorPlan:
         """
         创建板楼标准层平面（轴对称布局）。
@@ -742,8 +754,9 @@ class FloorPlanFactory:
         n = units_per_floor
         expanded = FloorPlanFactory._expand_unit_types(unit_types, n)
 
-        # 创建所有户型平面
-        plans = [UnitPlanPresets.create(ut) for ut in expanded]
+        # 创建所有户型平面（使用 UnitPlanGenerator 参数化生成）
+        UPG = _get_unit_plan_generator()
+        plans = [UPG.generate(ut, seed=seed + i) for i, ut in enumerate(expanded)]
 
         # 核心筒进深：取所有户型的最大进深
         max_depth = max(p.total_depth for p in plans)
@@ -828,6 +841,7 @@ class FloorPlanFactory:
         core_depth: float = 6.0,
         num_elevators: int = 2,
         units_per_floor: int = 4,
+        seed: int = 0,
     ) -> FloorPlan:
         """
         创建塔楼标准层平面（中心对称布局）。
@@ -877,8 +891,9 @@ class FloorPlanFactory:
             south_types = ["3BR"] * south_count
             north_types = ["3BR"] * north_count
 
-        south_plans = [UnitPlanPresets.create(ut) for ut in south_types]
-        north_plans = [UnitPlanPresets.create(ut) for ut in north_types]
+        UPG = _get_unit_plan_generator()
+        south_plans = [UPG.generate(ut, seed=seed + i) for i, ut in enumerate(south_types)]
+        north_plans = [UPG.generate(ut, seed=seed + south_count + i) for i, ut in enumerate(north_types)]
 
         # 计算尺寸
         south_max_depth = max(p.total_depth for p in south_plans)

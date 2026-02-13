@@ -36,6 +36,7 @@ from pcg_core.floor_plan import (
     FloorPlan, PlacedUnit, FloorPlanFactory,
     triangulate_polygon,
 )
+from pcg_core.unit_plan_generator import UnitPlanGenerator
 
 
 # =============================================================================
@@ -270,7 +271,8 @@ class ResidentialGenerator(GeneratorBase):
 
         n_units = self.cfg.units_per_floor
 
-        # 创建标准层平面
+        # 创建标准层平面（传递seed实现参数化变体）
+        seed = getattr(self.cfg, 'seed', 42)
         if self.cfg.building_type == "tower":
             self._floor_plan = FloorPlanFactory.create_tower_floor(
                 unit_types=unit_types,
@@ -278,6 +280,7 @@ class ResidentialGenerator(GeneratorBase):
                 core_depth=self.cfg.core_depth,
                 num_elevators=self.cfg.num_elevators,
                 units_per_floor=n_units,
+                seed=seed,
             )
         else:
             self._floor_plan = FloorPlanFactory.create_slab_floor(
@@ -286,6 +289,7 @@ class ResidentialGenerator(GeneratorBase):
                 core_depth=self.cfg.core_depth,
                 num_elevators=self.cfg.num_elevators,
                 units_per_floor=n_units,
+                seed=seed,
             )
 
         # 计算轮廓和三角化
