@@ -523,9 +523,11 @@ class ResidentialGenerator(GeneratorBase):
                 self._north_win_scales.append((hole["w"], hole["h"], 0.05))
 
             # ── 东山墙 (+X面) ──
+            # depth 减去南北外墙厚度，避免转角穿模
+            gable_depth = self._building_depth - 2 * wt
             self.bridge.create_box_mesh(
                 f"{floor_root}/EastWall",
-                width=wt, height=wall_h, depth=self._building_depth,
+                width=wt, height=wall_h, depth=gable_depth,
                 translate=(half_w - wt / 2, y_base + wall_h / 2, 0),
                 display_color=self.cfg.wall_color,
             )
@@ -534,7 +536,7 @@ class ResidentialGenerator(GeneratorBase):
             # ── 西山墙 (-X面) ──
             self.bridge.create_box_mesh(
                 f"{floor_root}/WestWall",
-                width=wt, height=wall_h, depth=self._building_depth,
+                width=wt, height=wall_h, depth=gable_depth,
                 translate=(-half_w + wt / 2, y_base + wall_h / 2, 0),
                 display_color=self.cfg.wall_color,
             )
@@ -915,16 +917,17 @@ class ResidentialGenerator(GeneratorBase):
                 display_color=self.cfg.shopfront_color,
             )
 
-            # 东西山墙
+            # 东西山墙（depth减去南北外墙厚度，避免转角穿模）
+            comm_gable_depth = self._building_depth - 2 * wt
             self.bridge.create_box_mesh(
                 f"{floor_path}/EastWall",
-                width=wt, height=wall_h, depth=self._building_depth,
+                width=wt, height=wall_h, depth=comm_gable_depth,
                 translate=(half_w - wt / 2, y_base + wall_h / 2, 0),
                 display_color=self.cfg.shopfront_color,
             )
             self.bridge.create_box_mesh(
                 f"{floor_path}/WestWall",
-                width=wt, height=wall_h, depth=self._building_depth,
+                width=wt, height=wall_h, depth=comm_gable_depth,
                 translate=(-half_w + wt / 2, y_base + wall_h / 2, 0),
                 display_color=self.cfg.shopfront_color,
             )
@@ -1033,17 +1036,18 @@ class ResidentialGenerator(GeneratorBase):
                 translate=(0, total_h + ph / 2, -half_d + wt / 2),
                 display_color=self.cfg.roof_color,
             )
-            # 东墙女儿墙
+            # 东墙女儿墙（depth减去南北女儿墙厚度，避免转角穿模）
+            parapet_gable_depth = self._building_depth - 2 * wt
             self.bridge.create_box_mesh(
                 f"{roof_root}/ParapetEast",
-                width=wt, height=ph, depth=self._building_depth,
+                width=wt, height=ph, depth=parapet_gable_depth,
                 translate=(half_w - wt / 2, total_h + ph / 2, 0),
                 display_color=self.cfg.roof_color,
             )
             # 西墙女儿墙
             self.bridge.create_box_mesh(
                 f"{roof_root}/ParapetWest",
-                width=wt, height=ph, depth=self._building_depth,
+                width=wt, height=ph, depth=parapet_gable_depth,
                 translate=(-half_w + wt / 2, total_h + ph / 2, 0),
                 display_color=self.cfg.roof_color,
             )
