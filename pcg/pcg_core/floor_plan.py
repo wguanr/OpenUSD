@@ -55,6 +55,18 @@ class RoomType(Enum):
     BALCONY = "balcony"         # 阳台（外挂）
     CORRIDOR = "corridor"       # 走廊/过道
     STORAGE = "storage"         # 储物间
+    ENTRANCE = "entrance"       # 玄关
+    STUDY = "study"             # 书房
+    WALK_IN_CLOSET = "closet"   # 衣帽间
+    STAIRCASE = "staircase"     # 楼梯间
+
+
+class Zone(Enum):
+    """动静分区标记。"""
+    DYNAMIC = "dynamic"         # 动区：客厅、餐厅、厨房、玄关
+    STATIC = "static"           # 静区：卧室、书房、儿童房
+    WET = "wet"                 # 湿区：厨房、卫生间
+    TRANSITION = "transition"   # 过渡区：走廊、玄关
 
 
 class Facing(Enum):
@@ -99,6 +111,11 @@ class Room:
     window_type: WindowType = WindowType.NONE
     has_balcony: bool = False
     has_ac_slot: bool = False
+
+    # 设计属性
+    zone: str = "transition"    # 动静分区: dynamic/static/wet/transition
+    is_suite_part: bool = False # 是否属于套间（主卧套间内的主卫/衣帽间）
+    shares_pipe_wall: bool = False  # 是否共享管井墙
 
     @property
     def x_end(self) -> float:
